@@ -77,7 +77,7 @@ Here is an example of a minimalistic spec of the ClusterAgent custom resource:
 apiVersion: appdynamics.com/v1alpha1
 kind: Clusteragent
 metadata:
-  name: K8s-Cluster-Agent
+  name: k8s-cluster-agent
 spec:
   controllerUrl: "<protocol>://<controller-url>:<port>"
 ```
