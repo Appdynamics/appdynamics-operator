@@ -129,7 +129,7 @@ spec:
   controllerUrl: "https://appd-controller.com"
   image: "docker.io/appdynamics/machine-agent-analytics:latest"
   account: "<your-account-name>"
-  globalAccount: "<your-global-account-name"
+  globalAccount: "<your-global-account-name>"
  
 ```
  
