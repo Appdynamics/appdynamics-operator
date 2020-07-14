@@ -419,6 +419,9 @@ func (r *ReconcileClusteragent) ensureAgentConfig(clusterAgent *appdynamicsv1alp
 	cm.Data["APPDYNAMICS_CLUSTER_EVENT_UPLOAD_INTERVAL"] = strconv.Itoa(clusterAgent.Spec.EventUploadInterval)
 	cm.Data["APPDYNAMICS_CLUSTER_CONTAINER_REGISTRATION_INTERVAL"] = strconv.Itoa(clusterAgent.Spec.ContainerRegistrationInterval)
 	cm.Data["APPDYNAMICS_CLUSTER_HTTP_CLIENT_TIMEOUT_INTERVAL"] = strconv.Itoa(clusterAgent.Spec.HttpClientTimeout)
+	cm.Data["APPDYNAMICS_AGENT_INITIAL_RETRY_WAIT_PERIOD"] = strconv.Itoa(clusterAgent.Spec.InitialRetryWaitPeriod)
+	cm.Data["APPDYNAMICS_AGENT_MAX_RETRY_DELAY_INTERVAL"] = strconv.Itoa(clusterAgent.Spec.MaxRetryDelayInterval)
+	cm.Data["APPDYNAMICS_AGENT_MAX_REQUEST_RETRY_COUNT"] = strconv.Itoa(clusterAgent.Spec.MaxRequestRetryCount)
 
 	if create {
 		e := r.client.Create(context.TODO(), cm)
@@ -968,6 +971,18 @@ func setClusterAgentConfigDefaults(clusterAgent *appdynamicsv1alpha1.Clusteragen
 
 	if clusterAgent.Spec.HttpClientTimeout == 0 {
 		clusterAgent.Spec.HttpClientTimeout = 30
+	}
+
+	if clusterAgent.Spec.InitialRetryWaitPeriod == 0 {
+		clusterAgent.Spec.InitialRetryWaitPeriod = 250
+	}
+
+	if clusterAgent.Spec.MaxRetryDelayInterval == 0 {
+		clusterAgent.Spec.MaxRetryDelayInterval = 1000
+	}
+
+	if clusterAgent.Spec.MaxRequestRetryCount == 0 {
+		clusterAgent.Spec.MaxRequestRetryCount = 3
 	}
 
 	// agent-monitoring defaults
