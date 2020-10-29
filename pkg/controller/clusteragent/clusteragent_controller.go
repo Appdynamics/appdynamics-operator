@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -260,7 +261,19 @@ func (r *ReconcileClusteragent) hasBreakingChanges(clusterAgent *appdynamicsv1al
 	if clusterAgent.Spec.Image != "" && existingDeployment.Spec.Template.Spec.Containers[0].Image != clusterAgent.Spec.Image {
 		fmt.Printf("Image changed from has changed: %s	to	%s. Updating....\n", existingDeployment.Spec.Template.Spec.Containers[0].Image, clusterAgent.Spec.Image)
 		existingDeployment.Spec.Template.Spec.Containers[0].Image = clusterAgent.Spec.Image
-		return false, true
+		updateDeployment = true
+	}
+
+	if !reflect.DeepEqual(clusterAgent.Spec.Tolerations, existingDeployment.Spec.Template.Spec.Tolerations) {
+		fmt.Printf("Tolerations changed from %v to %v", existingDeployment.Spec.Template.Spec.Tolerations, clusterAgent.Spec.Tolerations)
+		existingDeployment.Spec.Template.Spec.Tolerations = clusterAgent.Spec.Tolerations
+		updateDeployment = true
+	}
+
+	if !reflect.DeepEqual(clusterAgent.Spec.NodeSelector, existingDeployment.Spec.Template.Spec.NodeSelector) {
+		fmt.Printf("Node selector changed from %v to %v", existingDeployment.Spec.Template.Spec.NodeSelector, clusterAgent.Spec.NodeSelector)
+		existingDeployment.Spec.Template.Spec.NodeSelector = clusterAgent.Spec.NodeSelector
+		updateDeployment = true
 	}
 
 	return breakingChanges, updateDeployment
