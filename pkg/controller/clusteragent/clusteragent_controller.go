@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"strconv"
 	"strings"
 
@@ -630,6 +631,29 @@ func (r *ReconcileClusteragent) newAgentDeployment(clusterAgent *appdynamicsv1al
 	if clusterAgent.Spec.AccessSecret != "" {
 		secretName = clusterAgent.Spec.AccessSecret
 	}
+
+	resLimit := corev1.ResourceList{}
+	//resLimit[corev1.ResourceCPU] = resource.MustParse("0.5")
+	resLimit[corev1.ResourceMemory] = resource.MustParse("250M")
+	//if _, ok := clusterAgent.Spec.Resources.Limits[corev1.ResourceCPU]; ok {
+	//	resLimit[corev1.ResourceCPU] = clusterAgent.Spec.Resources.Limits[corev1.ResourceCPU]
+	//}
+	if _, ok := clusterAgent.Spec.Resources.Limits[corev1.ResourceMemory]; ok {
+		resLimit[corev1.ResourceMemory] = clusterAgent.Spec.Resources.Limits[corev1.ResourceMemory]
+	}
+
+	resRequest := corev1.ResourceList{}
+	//resRequest[corev1.ResourceCPU] = resource.MustParse("0.1")
+	resRequest[corev1.ResourceMemory] = resource.MustParse("100M")
+	//if _, ok := clusterAgent.Spec.Resources.Requests[corev1.ResourceCPU]; ok {
+	//	resRequest[corev1.ResourceCPU] = clusterAgent.Spec.Resources.Requests[corev1.ResourceCPU]
+	//}
+	if _, ok := clusterAgent.Spec.Resources.Requests[corev1.ResourceMemory]; ok {
+		resRequest[corev1.ResourceMemory] = clusterAgent.Spec.Resources.Requests[corev1.ResourceMemory]
+	}
+
+	clusterAgent.Spec.Resources.Limits = resLimit
+	clusterAgent.Spec.Resources.Requests = resRequest
 
 	fmt.Printf("Building deployment spec for image %s\n", clusterAgent.Spec.Image)
 	ls := labelsForClusteragent(clusterAgent)
