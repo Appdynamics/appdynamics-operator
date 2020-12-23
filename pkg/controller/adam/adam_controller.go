@@ -32,7 +32,7 @@ var log = logf.Log.WithName("controller_adam")
 
 const (
 	AGENT_SECRET_NAME         string = "cluster-agent-secret"
-	AGENt_CONFIG_NAME         string = "cluster-agent-config"
+	AGENt_CONFIG_NAME         string = "adam-config"
 	AGENT_SSL_CONFIG_NAME     string = "appd-agent-ssl-config"
 	AGENT_SSL_CRED_STORE_NAME string = "appd-agent-ssl-store"
 )
@@ -399,7 +399,7 @@ func (r *ReconcileAdam) cleanUp(clusterAgent *appdynamicsv1alpha1.Adam) {
 		namespace = clusterAgent.Namespace
 	}
 	cm := &corev1.ConfigMap{}
-	err := r.client.Get(context.TODO(), types.NamespacedName{Name: "cluster-agent-config", Namespace: namespace}, cm)
+	err := r.client.Get(context.TODO(), types.NamespacedName{Name: "adam-config", Namespace: namespace}, cm)
 	if err != nil && errors.IsNotFound(err) {
 		log.Info("The old instance of the configMap does not exist")
 		return
@@ -420,14 +420,14 @@ func (r *ReconcileAdam) cleanUp(clusterAgent *appdynamicsv1alpha1.Adam) {
 func (r *ReconcileAdam) ensureConfigMap(clusterAgent *appdynamicsv1alpha1.Adam, secret *corev1.Secret, create bool) (*corev1.ConfigMap, *appdynamicsv1alpha1.AppDBag, error) {
 	cm := &corev1.ConfigMap{}
 	var bag *appdynamicsv1alpha1.AppDBag
-	err := r.client.Get(context.TODO(), types.NamespacedName{Name: "cluster-agent-config", Namespace: clusterAgent.Namespace}, cm)
+	err := r.client.Get(context.TODO(), types.NamespacedName{Name: "adam-config", Namespace: clusterAgent.Namespace}, cm)
 	if err != nil && !errors.IsNotFound(err) {
-		return nil, nil, fmt.Errorf("Failed to load configMap cluster-agent-config. %v", err)
+		return nil, nil, fmt.Errorf("Failed to load configMap adam-config. %v", err)
 	}
 	if err != nil && errors.IsNotFound(err) {
 		fmt.Printf("Config map not found. Creating...\n")
 		//configMap does not exist. Create
-		cm.Name = "cluster-agent-config"
+		cm.Name = "adam-config"
 		cm.Namespace = clusterAgent.Namespace
 		bag, err = r.updateMap(cm, clusterAgent, secret, true)
 		if err != nil {
@@ -436,7 +436,7 @@ func (r *ReconcileAdam) ensureConfigMap(clusterAgent *appdynamicsv1alpha1.Adam, 
 	}
 	if err == nil {
 		//deserialize the map into the property bag
-		jsonData := cm.Data["cluster-agent-config.json"]
+		jsonData := cm.Data["adam-config.json"]
 		jsonErr := json.Unmarshal([]byte(jsonData), &bag)
 		if jsonErr != nil {
 			return nil, nil, fmt.Errorf("Enable to retrieve the configMap. Cannot deserialize. %v", jsonErr)
@@ -543,7 +543,7 @@ func (r *ReconcileAdam) updateMap(cm *corev1.ConfigMap, clusterAgent *appdynamic
 		return nil, fmt.Errorf("Enable to create configMap. Cannot serialize the config Bag. %v", errJson)
 	}
 	cm.Data = make(map[string]string)
-	cm.Data["cluster-agent-config.json"] = string(data)
+	cm.Data["adam-config.json"] = string(data)
 	var e error
 	if create {
 		e = r.client.Create(context.TODO(), cm)
@@ -554,7 +554,7 @@ func (r *ReconcileAdam) updateMap(cm *corev1.ConfigMap, clusterAgent *appdynamic
 	}
 
 	if e != nil {
-		return nil, fmt.Errorf("Failed to save configMap cluster-agent-config. %v", e)
+		return nil, fmt.Errorf("Failed to save configMap adam-config. %v", e)
 	}
 	return bag, nil
 }
@@ -625,7 +625,7 @@ func (r *ReconcileAdam) newAgentDeployment(clusterAgent *appdynamicsv1alpha1.Ada
 						VolumeSource: corev1.VolumeSource{
 							ConfigMap: &corev1.ConfigMapVolumeSource{
 								LocalObjectReference: corev1.LocalObjectReference{
-									Name: "cluster-agent-config",
+									Name: "adam-config",
 								},
 							},
 						},

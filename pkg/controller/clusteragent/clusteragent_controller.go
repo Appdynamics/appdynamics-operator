@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"strconv"
 	"strings"
 
@@ -31,13 +32,33 @@ import (
 var log = logf.Log.WithName("controller_clusteragent")
 
 const (
-	AGENT_SECRET_NAME         string = "cluster-agent-secret"
-	AGENT_CONFIG_NAME         string = "cluster-agent-config"
-	AGENT_MON_CONFIG_NAME     string = "cluster-agent-mon"
-	AGENT_LOG_CONFIG_NAME     string = "cluster-agent-log"
-	AGENT_SSL_CONFIG_NAME     string = "appd-agent-ssl-config"
-	AGENT_SSL_CRED_STORE_NAME string = "appd-agent-ssl-store"
-	OLD_SPEC                  string = "cluster-agent-spec"
+	AGENT_SECRET_NAME           string = "cluster-agent-secret"
+	AGENT_PROXY_SECRET_NAME     string = "cluster-agent-proxy-secret"
+	AGENT_CONFIG_NAME           string = "cluster-agent-config"
+	AGENT_MON_CONFIG_NAME       string = "cluster-agent-mon"
+	AGENT_LOG_CONFIG_NAME       string = "cluster-agent-log"
+	INSTRUMENTATION_CONFIG_NAME string = "instrumentation-config"
+	AGENT_SSL_CONFIG_NAME       string = "appd-agent-ssl-config"
+	AGENT_SSL_CRED_STORE_NAME   string = "appd-agent-ssl-store"
+	OLD_SPEC                    string = "cluster-agent-spec"
+	ALLOWLISTED                 string = "allowlisted"
+	BLOCKLISTED                 string = "blocklisted"
+
+	ENV_INSTRUMENTATION     string = "Env"
+	MATCH_ALL_REGEX         string = ".*"
+	NO_INSTRUMENTATION             = "None"
+	JAVA_LANGUAGE           string = "java"
+	DOTNET_LANGUAGE         string = "dotnetcore"
+	NODEJS_LANGUAGE         string = "nodejs"
+	AppDJavaAttachImage            = "docker.io/appdynamics/java-agent:latest"
+	AppDDotNetAttachImage          = "docker.io/appdynamics/dotnet-core-agent:latest"
+	AppDNodeJSAttachImage          = "docker.io/appdynamics/nodejs-agent:20.8.0-stretch-slimv10"
+	AGENT_MOUNT_PATH               = "/opt/appdynamics"
+	IMAGE_PULL_POLICY              = "IfNotPresent"
+	Deployment                     = "Deployment"
+	JAVA_TOOL_OPTIONS              = "JAVA_TOOL_OPTIONS"
+	FIRST                          = "first"
+	MANUAL_APPNAME_STRATEGY        = "manual"
 )
 
 // Add creates a new Clusteragent Controller and adds it to the Manager. The Manager will set fields on the Controller
@@ -163,6 +184,14 @@ func (r *ReconcileClusteragent) Reconcile(request reconcile.Request) (reconcile.
 
 	if breaking {
 		fmt.Println("Breaking changes detected. Restarting the cluster agent pod...")
+
+		saveOrUpdateClusterAgentSpecAnnotation(clusterAgent, existingDeployment)
+		errUpdate := r.client.Update(context.TODO(), existingDeployment)
+		if errUpdate != nil {
+			reqLogger.Error(errUpdate, "Failed to update cluster agent", "clusterAgent.Namespace", clusterAgent.Namespace, "Deployment.Name", clusterAgent.Name)
+			return reconcile.Result{}, errUpdate
+		}
+
 		errRestart := r.restartAgent(clusterAgent)
 		if errRestart != nil {
 			reqLogger.Error(errRestart, "Failed to restart cluster agent", "clusterAgent.Namespace", clusterAgent.Namespace, "Deployment.Name", clusterAgent.Name)
@@ -242,15 +271,20 @@ func (r *ReconcileClusteragent) hasBreakingChanges(clusterAgent *appdynamicsv1al
 func (r *ReconcileClusteragent) ensureSecret(clusterAgent *appdynamicsv1alpha1.Clusteragent) (*corev1.Secret, error) {
 	secret := &corev1.Secret{}
 
-	key := client.ObjectKey{Namespace: clusterAgent.Namespace, Name: AGENT_SECRET_NAME}
+	secretName := AGENT_SECRET_NAME
+	if clusterAgent.Spec.AccessSecret != "" {
+		secretName = clusterAgent.Spec.AccessSecret
+	}
+
+	key := client.ObjectKey{Namespace: clusterAgent.Namespace, Name: secretName}
 	err := r.client.Get(context.TODO(), key, secret)
 	if err != nil && errors.IsNotFound(err) {
-		fmt.Printf("Required secret %s not found. An empty secret will be created, but the clusteragent will not start until at least the 'api-user' key of the secret has a valid value", AGENT_SECRET_NAME)
+		fmt.Printf("Required secret %s not found. An empty secret will be created, but the clusteragent will not start until at least the 'controller-key' key of the secret has a valid value", secretName)
 
 		secret = &corev1.Secret{
 			Type: corev1.SecretTypeOpaque,
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      AGENT_SECRET_NAME,
+				Name:      secretName,
 				Namespace: clusterAgent.Namespace,
 			},
 		}
@@ -263,7 +297,7 @@ func (r *ReconcileClusteragent) ensureSecret(clusterAgent *appdynamicsv1alpha1.C
 			fmt.Printf("Unable to create secret. %v\n", errCreate)
 			return nil, fmt.Errorf("Unable to get secret for cluster-agent. %v", errCreate)
 		} else {
-			fmt.Printf("Secret created. %s\n", AGENT_SECRET_NAME)
+			fmt.Printf("Secret created. %s\n", secretName)
 			errLoad := r.client.Get(context.TODO(), key, secret)
 			if errLoad != nil {
 				fmt.Printf("Unable to reload secret. %v\n", errLoad)
@@ -302,12 +336,20 @@ func (r *ReconcileClusteragent) cleanUp(clusterAgent *appdynamicsv1alpha1.Cluste
 }
 
 func (r *ReconcileClusteragent) ensureConfigMap(clusterAgent *appdynamicsv1alpha1.Clusteragent, secret *corev1.Secret, create bool) error {
+	setClusterAgentConfigDefaults(clusterAgent)
+	setInstrumentationAgentDefaults(clusterAgent)
+
 	err := r.ensureAgentMonConfig(clusterAgent)
 	if err != nil {
 		return err
 	}
 
 	err = r.ensureAgentConfig(clusterAgent)
+	if err != nil {
+		return err
+	}
+
+	err = r.ensureInstrumentationConfig(clusterAgent)
 	if err != nil {
 		return err
 	}
@@ -377,6 +419,14 @@ func (r *ReconcileClusteragent) ensureAgentConfig(clusterAgent *appdynamicsv1alp
 	cm.Data["APPDYNAMICS_CONTROLLER_SSL_ENABLED"] = sslEnabled
 	cm.Data["APPDYNAMICS_CLUSTER_NAME"] = clusterAgent.Spec.AppName
 
+	cm.Data["APPDYNAMICS_AGENT_PROXY_URL"] = clusterAgent.Spec.ProxyUrl
+	cm.Data["APPDYNAMICS_AGENT_PROXY_USER"] = clusterAgent.Spec.ProxyUser
+
+	cm.Data["APPDYNAMICS_CLUSTER_MONITORED_NAMESPACES"] = strings.Join(clusterAgent.Spec.NsToMonitor, ",")
+	cm.Data["APPDYNAMICS_CLUSTER_EVENT_UPLOAD_INTERVAL"] = strconv.Itoa(clusterAgent.Spec.EventUploadInterval)
+	cm.Data["APPDYNAMICS_CLUSTER_CONTAINER_REGISTRATION_INTERVAL"] = strconv.Itoa(clusterAgent.Spec.ContainerRegistrationInterval)
+	cm.Data["APPDYNAMICS_CLUSTER_HTTP_CLIENT_TIMEOUT_INTERVAL"] = strconv.Itoa(clusterAgent.Spec.HttpClientTimeout)
+
 	if create {
 		e := r.client.Create(context.TODO(), cm)
 		if e != nil {
@@ -395,15 +445,29 @@ func (r *ReconcileClusteragent) ensureAgentConfig(clusterAgent *appdynamicsv1alp
 }
 
 func (r *ReconcileClusteragent) ensureAgentMonConfig(clusterAgent *appdynamicsv1alpha1.Clusteragent) error {
-	if clusterAgent.Spec.MetricsSyncInterval == 0 {
-		clusterAgent.Spec.MetricsSyncInterval = 30
-	}
-	
 	yml := fmt.Sprintf(`metric-collection-interval-seconds: %d
-container-filter:
-  blacklisted-label:
-    appdynamics.exclude:
-      true`, clusterAgent.Spec.MetricsSyncInterval)
+cluster-metric-collection-interval-seconds: %d
+metadata-collection-interval-seconds: %d
+container-registration-batch-size: %d
+pod-registration-batch-size: %d
+metric-upload-retry-count: %d
+metric-upload-retry-interval-milliseconds: %d
+max-pods-to-register-count: %d
+max-pod-logs-tail-lines-count: %d
+pod-filter: %s`, clusterAgent.Spec.MetricsSyncInterval, clusterAgent.Spec.ClusterMetricsSyncInterval, clusterAgent.Spec.MetadataSyncInterval,
+		clusterAgent.Spec.ContainerBatchSize, clusterAgent.Spec.PodBatchSize,
+		clusterAgent.Spec.MetricUploadRetryCount, clusterAgent.Spec.MetricUploadRetryIntervalMilliSeconds,
+		clusterAgent.Spec.MaxPodsToRegisterCount, clusterAgent.Spec.MaxPodLogsTailLinesCount,
+		createPodFilterString(clusterAgent))
+
+	if clusterAgent.Spec.NsToMonitorRegex != "" {
+		yml = fmt.Sprintf(`%s
+ns-to-monitor-regex: %s`, yml, clusterAgent.Spec.NsToMonitorRegex)
+	}
+	if clusterAgent.Spec.NsToExcludeRegex != "" {
+		yml = fmt.Sprintf(`%s
+ns-to-exclude-regex: %s`, yml, clusterAgent.Spec.NsToExcludeRegex)
+	}
 
 	cm := &corev1.ConfigMap{}
 	err := r.client.Get(context.TODO(), types.NamespacedName{Name: AGENT_MON_CONFIG_NAME, Namespace: clusterAgent.Namespace}, cm)
@@ -436,22 +500,72 @@ container-filter:
 	return nil
 }
 
+func (r *ReconcileClusteragent) ensureInstrumentationConfig(clusterAgent *appdynamicsv1alpha1.Clusteragent) error {
+	yml := fmt.Sprintf(`instrumentation-method: %s
+default-match-string: %s
+default-label-match: %s
+image-info: %v
+default-language: %s
+ns-to-instrument: %s
+resources-to-instrument: %s
+default-env: %s
+default-custom-agent-config: %s
+default-app-name: %s
+app-name-label: %s
+instrument-container: %s
+container-match-string: %s
+netviz-info: %v
+run-as-user: %d
+run-as-group: %d
+app-name-strategy: %s
+number-of-task-workers: %d
+default-analytics-host: %s
+default-analytics-port: %d
+default-analytics-ssl-enabled: %t
+instrumentation-rules: %v`, clusterAgent.Spec.InstrumentationMethod, clusterAgent.Spec.DefaultInstrumentMatchString,
+		mapToJsonString(clusterAgent.Spec.DefaultLabelMatch), imageInfoMapToJsonString(clusterAgent.Spec.ImageInfoMap), clusterAgent.Spec.DefaultInstrumentationTech,
+		clusterAgent.Spec.NsToInstrumentRegex, strings.Join(clusterAgent.Spec.ResourcesToInstrument, ","), clusterAgent.Spec.DefaultEnv,
+		clusterAgent.Spec.DefaultCustomConfig, clusterAgent.Spec.DefaultAppName, clusterAgent.Spec.AppNameLabel, clusterAgent.Spec.InstrumentContainer,
+		clusterAgent.Spec.DefaultContainerMatchString, netvizInfoToJsonString(clusterAgent.Spec.NetvizInfo), clusterAgent.Spec.RunAsUser, clusterAgent.Spec.RunAsGroup,
+		clusterAgent.Spec.AppNameStrategy, clusterAgent.Spec.NumberOfTaskWorkers, clusterAgent.Spec.DefaultAnalyticsHost, clusterAgent.Spec.DefaultAnalyticsPort, clusterAgent.Spec.DefaultAnalyticsSslEnabled, instrumentationRulesToJsonString(clusterAgent.Spec.InstrumentationRules))
+
+	cm := &corev1.ConfigMap{}
+	err := r.client.Get(context.TODO(), types.NamespacedName{Name: INSTRUMENTATION_CONFIG_NAME, Namespace: clusterAgent.Namespace}, cm)
+
+	create := err != nil && errors.IsNotFound(err)
+
+	if err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("Unable to load Agent  configMap. %v", err)
+	}
+
+	cm.Name = INSTRUMENTATION_CONFIG_NAME
+	cm.Namespace = clusterAgent.Namespace
+	cm.Data = make(map[string]string)
+	cm.Data["instrumentation.yml"] = string(yml)
+
+	if create {
+		e := r.client.Create(context.TODO(), cm)
+		if e != nil {
+			return fmt.Errorf("Unable to create Agent configMap. %v", e)
+		}
+		fmt.Println("Agent Configmap created")
+	} else {
+		e := r.client.Update(context.TODO(), cm)
+		if e != nil {
+			return fmt.Errorf("Unable to update Agent configMap. %v", e)
+		}
+		fmt.Println("Agent Configmap updated")
+	}
+
+	return nil
+}
+
 func (r *ReconcileClusteragent) ensureLogConfig(clusterAgent *appdynamicsv1alpha1.Clusteragent) error {
-	if clusterAgent.Spec.LogLevel == "" {
-		clusterAgent.Spec.LogLevel = "INFO"
-	}
-
-	if clusterAgent.Spec.LogFileSizeMb == 0 {
-		clusterAgent.Spec.LogFileSizeMb = 5
-	}
-	if clusterAgent.Spec.LogFileBackups == 0 {
-		clusterAgent.Spec.LogFileBackups = 3
-	}
-
 	yml := fmt.Sprintf(`log-level: %s
 max-filesize-mb: %d
 max-backups: %d
-write-to-stdout: %t`, clusterAgent.Spec.LogLevel, clusterAgent.Spec.LogFileSizeMb, clusterAgent.Spec.LogFileBackups, clusterAgent.Spec.StdoutLogging)
+write-to-stdout: %s`, clusterAgent.Spec.LogLevel, clusterAgent.Spec.LogFileSizeMb, clusterAgent.Spec.LogFileBackups,
+		strings.ToLower(clusterAgent.Spec.StdoutLogging))
 
 	cm := &corev1.ConfigMap{}
 	err := r.client.Get(context.TODO(), types.NamespacedName{Name: AGENT_LOG_CONFIG_NAME, Namespace: clusterAgent.Namespace}, cm)
@@ -509,9 +623,34 @@ func (r *ReconcileClusteragent) newAgentDeployment(clusterAgent *appdynamicsv1al
 	if clusterAgent.Spec.Image == "" {
 		clusterAgent.Spec.Image = "appdynamics/cluster-agent:latest"
 	}
+
+	if clusterAgent.Spec.ServiceAccountName == "" {
+		clusterAgent.Spec.ServiceAccountName = "appdynamics-operator"
+	}
+
+	secretName := AGENT_SECRET_NAME
+	if clusterAgent.Spec.AccessSecret != "" {
+		secretName = clusterAgent.Spec.AccessSecret
+	}
+
+	resLimit := corev1.ResourceList{}
+	resLimit[corev1.ResourceCPU] = resource.MustParse("1250m")
+	resLimit[corev1.ResourceMemory] = resource.MustParse("300Mi")
+
+	resRequest := corev1.ResourceList{}
+	resRequest[corev1.ResourceCPU] = resource.MustParse("750m")
+	resRequest[corev1.ResourceMemory] = resource.MustParse("150Mi")
+
+	resRequirements := corev1.ResourceRequirements{Requests: resRequest, Limits: resLimit}
+
+	if len(clusterAgent.Spec.Resources.Limits) == 0 && len(clusterAgent.Spec.Resources.Requests) == 0 {
+		clusterAgent.Spec.Resources = resRequirements
+	}
+
 	fmt.Printf("Building deployment spec for image %s\n", clusterAgent.Spec.Image)
 	ls := labelsForClusteragent(clusterAgent)
 	var replicas int32 = 1
+	var optional = true
 	dep := &appsv1.Deployment{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "apps/v1",
@@ -531,7 +670,9 @@ func (r *ReconcileClusteragent) newAgentDeployment(clusterAgent *appdynamicsv1al
 					Labels: ls,
 				},
 				Spec: corev1.PodSpec{
-					ServiceAccountName: "appdynamics-operator",
+					NodeSelector:       clusterAgent.Spec.NodeSelector,
+					ServiceAccountName: clusterAgent.Spec.ServiceAccountName,
+					Tolerations:        clusterAgent.Spec.Tolerations,
 					Containers: []corev1.Container{{
 						EnvFrom: []corev1.EnvFromSource{{
 							ConfigMapRef: &corev1.ConfigMapEnvSource{
@@ -542,8 +683,18 @@ func (r *ReconcileClusteragent) newAgentDeployment(clusterAgent *appdynamicsv1al
 								Name: "APPDYNAMICS_AGENT_ACCOUNT_ACCESS_KEY",
 								ValueFrom: &corev1.EnvVarSource{
 									SecretKeyRef: &corev1.SecretKeySelector{
-										LocalObjectReference: corev1.LocalObjectReference{Name: AGENT_SECRET_NAME},
+										LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
 										Key:                  "controller-key",
+									},
+								},
+							},
+							{
+								Name: "APPDYNAMICS_USER_CREDENTIALS",
+								ValueFrom: &corev1.EnvVarSource{
+									SecretKeyRef: &corev1.SecretKeySelector{
+										LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+										Key:                  "api-user",
+										Optional:             &optional,
 									},
 								},
 							},
@@ -555,6 +706,14 @@ func (r *ReconcileClusteragent) newAgentDeployment(clusterAgent *appdynamicsv1al
 									},
 								},
 							},
+							{
+								Name: "NODE_NAME",
+								ValueFrom: &corev1.EnvVarSource{
+									FieldRef: &corev1.ObjectFieldSelector{
+										FieldPath: "spec.nodeName",
+									},
+								},
+							},
 						},
 						Image:           clusterAgent.Spec.Image,
 						ImagePullPolicy: corev1.PullAlways,
@@ -562,12 +721,15 @@ func (r *ReconcileClusteragent) newAgentDeployment(clusterAgent *appdynamicsv1al
 						Resources:       clusterAgent.Spec.Resources,
 						VolumeMounts: []corev1.VolumeMount{{
 							Name:      "agent-mon-config",
-							MountPath: "/opt/appdynamics/cluster-agent/config/agent-monitoring.yml",
-							SubPath:   "agent-monitoring.yml",
+							MountPath: "/opt/appdynamics/cluster-agent/config/agent-monitoring/",
 						},
 							{
 								Name:      "agent-log",
 								MountPath: "/opt/appdynamics/cluster-agent/config/logging/",
+							},
+							{
+								Name:      "instrumentation-config",
+								MountPath: "/opt/appdynamics/cluster-agent/config/instrumentation",
 							}},
 					}},
 					Volumes: []corev1.Volume{{
@@ -580,6 +742,16 @@ func (r *ReconcileClusteragent) newAgentDeployment(clusterAgent *appdynamicsv1al
 							},
 						},
 					},
+						{
+							Name: "instrumentation-config",
+							VolumeSource: corev1.VolumeSource{
+								ConfigMap: &corev1.ConfigMapVolumeSource{
+									LocalObjectReference: corev1.LocalObjectReference{
+										Name: INSTRUMENTATION_CONFIG_NAME,
+									},
+								},
+							},
+						},
 						{
 							Name: "agent-log",
 							VolumeSource: corev1.VolumeSource{
@@ -595,7 +767,7 @@ func (r *ReconcileClusteragent) newAgentDeployment(clusterAgent *appdynamicsv1al
 		},
 	}
 
-	//mount custom SSL cert if necessary
+	//mount custom SSL cert if necessary (can contain controller and proxy SSL certs)
 	if clusterAgent.Spec.CustomSSLSecret != "" {
 		sslVol := corev1.Volume{
 			Name: "agent-ssl-cert",
@@ -609,13 +781,69 @@ func (r *ReconcileClusteragent) newAgentDeployment(clusterAgent *appdynamicsv1al
 
 		sslMount := corev1.VolumeMount{
 			Name:      "agent-ssl-cert",
-			MountPath: fmt.Sprintf("/opt/appdynamics/ssl/%s", clusterAgent.Spec.AgentSSLCert),
-			SubPath:   clusterAgent.Spec.AgentSSLCert,
+			MountPath: "/opt/appdynamics/ssl",
 		}
 		dep.Spec.Template.Spec.Containers[0].VolumeMounts = append(dep.Spec.Template.Spec.Containers[0].VolumeMounts, sslMount)
 	}
 
+	customSSLSecret := corev1.EnvVar{
+		Name:  "APPDYNAMICS_CUSTOM_SSL_SECRET",
+		Value: clusterAgent.Spec.CustomSSLSecret,
+	}
+	dep.Spec.Template.Spec.Containers[0].Env = append(dep.Spec.Template.Spec.Containers[0].Env, customSSLSecret)
+
+	//security context override
+	var podSec *corev1.PodSecurityContext = nil
+	if clusterAgent.Spec.RunAsUser > 0 {
+		podSec = &corev1.PodSecurityContext{RunAsUser: &clusterAgent.Spec.RunAsUser}
+		if clusterAgent.Spec.RunAsGroup > 0 {
+			podSec.RunAsGroup = &clusterAgent.Spec.RunAsGroup
+		}
+		if clusterAgent.Spec.FSGroup > 0 {
+			podSec.FSGroup = &clusterAgent.Spec.FSGroup
+		}
+	}
+
+	if podSec != nil {
+		dep.Spec.Template.Spec.SecurityContext = podSec
+	}
+
+	//image pull secret
+	if clusterAgent.Spec.ImagePullSecret != "" {
+		dep.Spec.Template.Spec.ImagePullSecrets = []corev1.LocalObjectReference{
+			{Name: clusterAgent.Spec.ImagePullSecret},
+		}
+	}
+
+	if clusterAgent.Spec.ProxyUser != "" {
+		secret := &corev1.Secret{}
+		key := client.ObjectKey{Namespace: clusterAgent.Namespace, Name: AGENT_PROXY_SECRET_NAME}
+		err := r.client.Get(context.TODO(), key, secret)
+		if err == nil {
+			proxyPassword := corev1.EnvVar{
+				Name: "APPDYNAMICS_AGENT_PROXY_PASSWORD",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: AGENT_PROXY_SECRET_NAME},
+						Key:                  "proxy-password",
+					},
+				},
+			}
+			dep.Spec.Template.Spec.Containers[0].Env = append(dep.Spec.Template.Spec.Containers[0].Env, proxyPassword)
+		} else {
+			log.Error(err, "Unable to load secret cluster-agent-proxy-secret for proxy password.")
+		}
+	}
+
 	//save the new spec in annotations
+	saveOrUpdateClusterAgentSpecAnnotation(clusterAgent, dep)
+
+	// Set Cluster Agent instance as the owner and controller
+	controllerutil.SetControllerReference(clusterAgent, dep, r.scheme)
+	return dep
+}
+
+func saveOrUpdateClusterAgentSpecAnnotation(clusterAgent *appdynamicsv1alpha1.Clusteragent, dep *appsv1.Deployment) {
 	jsonObj, e := json.Marshal(clusterAgent)
 	if e != nil {
 		log.Error(e, "Unable to serialize the current spec", "clusterAgent.Namespace", clusterAgent.Namespace, "clusterAgent.Name", clusterAgent.Name)
@@ -625,10 +853,6 @@ func (r *ReconcileClusteragent) newAgentDeployment(clusterAgent *appdynamicsv1al
 		}
 		dep.Annotations[OLD_SPEC] = string(jsonObj)
 	}
-
-	// Set Cluster Agent instance as the owner and controller
-	controllerutil.SetControllerReference(clusterAgent, dep, r.scheme)
-	return dep
 }
 
 func (r *ReconcileClusteragent) restartAgent(clusterAgent *appdynamicsv1alpha1.Clusteragent) error {
@@ -653,4 +877,383 @@ func (r *ReconcileClusteragent) restartAgent(clusterAgent *appdynamicsv1alpha1.C
 
 func labelsForClusteragent(clusterAgent *appdynamicsv1alpha1.Clusteragent) map[string]string {
 	return map[string]string{"name": "clusterAgent", "clusterAgent_cr": clusterAgent.Name}
+}
+
+func setInstrumentationAgentDefaults(clusterAgent *appdynamicsv1alpha1.Clusteragent) {
+	if clusterAgent.Spec.InstrumentationMethod == "" {
+		clusterAgent.Spec.InstrumentationMethod = NO_INSTRUMENTATION
+	}
+
+	if clusterAgent.Spec.DefaultLabelMatch == nil {
+		clusterAgent.Spec.DefaultLabelMatch = make([]map[string]string, 0)
+	}
+
+	defaultImageInfoMap := map[string]appdynamicsv1alpha1.ImageInfo{
+		JAVA_LANGUAGE: {
+			Image:           AppDJavaAttachImage,
+			AgentMountPath:  AGENT_MOUNT_PATH,
+			ImagePullPolicy: IMAGE_PULL_POLICY,
+		},
+		DOTNET_LANGUAGE: {
+			Image:           AppDDotNetAttachImage,
+			AgentMountPath:  AGENT_MOUNT_PATH,
+			ImagePullPolicy: IMAGE_PULL_POLICY,
+		},
+		NODEJS_LANGUAGE: {
+			Image:           AppDNodeJSAttachImage,
+			AgentMountPath:  AGENT_MOUNT_PATH,
+			ImagePullPolicy: IMAGE_PULL_POLICY,
+		},
+	}
+	if clusterAgent.Spec.ImageInfoMap == nil {
+		clusterAgent.Spec.ImageInfoMap = defaultImageInfoMap
+	} else {
+		for _, language := range []string{JAVA_LANGUAGE, DOTNET_LANGUAGE, NODEJS_LANGUAGE} {
+			imageInfo, exists := clusterAgent.Spec.ImageInfoMap[language]
+			if exists {
+				if imageInfo.Image == "" {
+					imageInfo.Image = defaultImageInfoMap[language].Image
+				}
+				if imageInfo.AgentMountPath == "" {
+					imageInfo.AgentMountPath = defaultImageInfoMap[language].AgentMountPath
+				}
+				if imageInfo.ImagePullPolicy == "" {
+					imageInfo.ImagePullPolicy = defaultImageInfoMap[language].ImagePullPolicy
+				}
+				clusterAgent.Spec.ImageInfoMap[language] = imageInfo
+			} else {
+				clusterAgent.Spec.ImageInfoMap[language] = defaultImageInfoMap[language]
+			}
+		}
+	}
+
+	if clusterAgent.Spec.DefaultInstrumentMatchString == "" {
+		clusterAgent.Spec.DefaultInstrumentMatchString = MATCH_ALL_REGEX
+	}
+
+	if clusterAgent.Spec.DefaultInstrumentationTech == "" {
+		clusterAgent.Spec.DefaultInstrumentationTech = JAVA_LANGUAGE
+	}
+
+	if clusterAgent.Spec.ResourcesToInstrument == nil {
+		clusterAgent.Spec.ResourcesToInstrument = []string{Deployment}
+	}
+
+	if clusterAgent.Spec.DefaultEnv == "" {
+		clusterAgent.Spec.DefaultEnv = JAVA_TOOL_OPTIONS
+	}
+
+	if clusterAgent.Spec.InstrumentContainer == "" {
+		clusterAgent.Spec.InstrumentContainer = FIRST
+	}
+
+	if clusterAgent.Spec.NetvizInfo == (appdynamicsv1alpha1.NetvizInfo{}) {
+		clusterAgent.Spec.NetvizInfo = appdynamicsv1alpha1.NetvizInfo{
+			BciEnabled: true,
+			Port:       3892,
+		}
+	}
+
+	if clusterAgent.Spec.AppNameStrategy == "" {
+		clusterAgent.Spec.AppNameStrategy = MANUAL_APPNAME_STRATEGY
+	}
+
+	setInstrumentationRuleDefault(clusterAgent)
+}
+
+func setInstrumentationRuleDefault(clusterAgent *appdynamicsv1alpha1.Clusteragent) {
+	// Note: We do not set any default to appname. It will be determined at runtime
+	for i := range clusterAgent.Spec.InstrumentationRules {
+		if clusterAgent.Spec.InstrumentationRules[i].EnvToUse == "" {
+			clusterAgent.Spec.InstrumentationRules[i].EnvToUse = clusterAgent.Spec.DefaultEnv
+		}
+
+		if len(clusterAgent.Spec.InstrumentationRules[i].LabelMatch) == 0 {
+			clusterAgent.Spec.InstrumentationRules[i].LabelMatch = clusterAgent.Spec.DefaultLabelMatch
+		}
+
+		if clusterAgent.Spec.InstrumentationRules[i].MatchString == "" {
+			clusterAgent.Spec.InstrumentationRules[i].MatchString = clusterAgent.Spec.DefaultInstrumentMatchString
+		}
+
+		if clusterAgent.Spec.InstrumentationRules[i].Language == "" {
+			clusterAgent.Spec.InstrumentationRules[i].Language = clusterAgent.Spec.DefaultInstrumentationTech
+		}
+
+		if clusterAgent.Spec.InstrumentationRules[i].ImageInfo == (appdynamicsv1alpha1.ImageInfo{}) {
+			clusterAgent.Spec.InstrumentationRules[i].ImageInfo = clusterAgent.Spec.ImageInfoMap[clusterAgent.Spec.InstrumentationRules[i].Language]
+		} else {
+			if clusterAgent.Spec.InstrumentationRules[i].ImageInfo.Image == "" {
+				clusterAgent.Spec.InstrumentationRules[i].ImageInfo.Image = AppDJavaAttachImage
+			}
+			if clusterAgent.Spec.InstrumentationRules[i].ImageInfo.AgentMountPath == "" {
+				clusterAgent.Spec.InstrumentationRules[i].ImageInfo.AgentMountPath = AGENT_MOUNT_PATH
+			}
+			if clusterAgent.Spec.InstrumentationRules[i].ImageInfo.ImagePullPolicy == "" {
+				clusterAgent.Spec.InstrumentationRules[i].ImageInfo.ImagePullPolicy = IMAGE_PULL_POLICY
+			}
+		}
+
+		if clusterAgent.Spec.InstrumentationRules[i].InstrumentContainer == "" {
+			clusterAgent.Spec.InstrumentationRules[i].InstrumentContainer = clusterAgent.Spec.InstrumentContainer
+		}
+
+		if clusterAgent.Spec.InstrumentationRules[i].ContainerNameMatchString == "" {
+			clusterAgent.Spec.InstrumentationRules[i].ContainerNameMatchString = clusterAgent.Spec.DefaultContainerMatchString
+		}
+
+		if clusterAgent.Spec.InstrumentationRules[i].CustomAgentConfig == "" {
+			clusterAgent.Spec.InstrumentationRules[i].CustomAgentConfig = clusterAgent.Spec.DefaultCustomConfig
+		}
+
+		if clusterAgent.Spec.InstrumentationRules[i].NetvizInfo == (appdynamicsv1alpha1.NetvizInfo{}) {
+			clusterAgent.Spec.InstrumentationRules[i].NetvizInfo = clusterAgent.Spec.NetvizInfo
+		}
+
+		if clusterAgent.Spec.InstrumentationRules[i].RunAsUser == 0 {
+			clusterAgent.Spec.InstrumentationRules[i].RunAsUser = clusterAgent.Spec.RunAsUser
+		}
+
+		if clusterAgent.Spec.InstrumentationRules[i].RunAsGroup == 0 {
+			clusterAgent.Spec.InstrumentationRules[i].RunAsGroup = clusterAgent.Spec.RunAsGroup
+		}
+
+		if clusterAgent.Spec.InstrumentationRules[i].AnalyticsHost == "" && clusterAgent.Spec.InstrumentationRules[i].AnalyticsPort == 0 {
+			clusterAgent.Spec.InstrumentationRules[i].AnalyticsSslEnabled = clusterAgent.Spec.DefaultAnalyticsSslEnabled
+		}
+
+		if clusterAgent.Spec.InstrumentationRules[i].AnalyticsHost == "" {
+			clusterAgent.Spec.InstrumentationRules[i].AnalyticsHost = clusterAgent.Spec.DefaultAnalyticsHost
+		}
+
+		if clusterAgent.Spec.InstrumentationRules[i].AnalyticsPort == 0 {
+			clusterAgent.Spec.InstrumentationRules[i].AnalyticsPort = clusterAgent.Spec.DefaultAnalyticsPort
+		}
+	}
+}
+
+func setClusterAgentConfigDefaults(clusterAgent *appdynamicsv1alpha1.Clusteragent) {
+	// bootstrap-config defaults
+	if clusterAgent.Spec.NsToMonitor == nil {
+		clusterAgent.Spec.NsToMonitor = []string{"default"}
+	}
+
+	if clusterAgent.Spec.EventUploadInterval == 0 {
+		clusterAgent.Spec.EventUploadInterval = 10
+	}
+
+	if clusterAgent.Spec.NumberOfTaskWorkers == 0 {
+		clusterAgent.Spec.NumberOfTaskWorkers = 2
+	}
+
+	if clusterAgent.Spec.ContainerRegistrationInterval == 0 {
+		clusterAgent.Spec.ContainerRegistrationInterval = 120
+	}
+
+	if clusterAgent.Spec.HttpClientTimeout == 0 {
+		clusterAgent.Spec.HttpClientTimeout = 30
+	}
+
+	// agent-monitoring defaults
+	if clusterAgent.Spec.MetricsSyncInterval == 0 {
+		clusterAgent.Spec.MetricsSyncInterval = 30
+	}
+
+	if clusterAgent.Spec.ClusterMetricsSyncInterval == 0 {
+		clusterAgent.Spec.ClusterMetricsSyncInterval = 60
+	}
+
+	if clusterAgent.Spec.MetadataSyncInterval == 0 {
+		clusterAgent.Spec.MetadataSyncInterval = 60
+	}
+
+	if clusterAgent.Spec.ContainerBatchSize == 0 {
+		clusterAgent.Spec.ContainerBatchSize = 5
+	}
+
+	if clusterAgent.Spec.PodBatchSize == 0 {
+		clusterAgent.Spec.PodBatchSize = 6
+	}
+
+	if clusterAgent.Spec.MetricUploadRetryCount == 0 {
+		clusterAgent.Spec.MetricUploadRetryCount = 2
+	}
+
+	if clusterAgent.Spec.MetricUploadRetryIntervalMilliSeconds == 0 {
+		clusterAgent.Spec.MetricUploadRetryIntervalMilliSeconds = 5
+	}
+
+	if clusterAgent.Spec.MaxPodsToRegisterCount == 0 {
+		clusterAgent.Spec.MaxPodsToRegisterCount = 750
+	}
+
+	if clusterAgent.Spec.MaxPodLogsTailLinesCount == 0 {
+		clusterAgent.Spec.MaxPodLogsTailLinesCount = 500
+	}
+
+	// logger defaults
+	if clusterAgent.Spec.LogLevel == "" {
+		clusterAgent.Spec.LogLevel = "INFO"
+	}
+
+	if clusterAgent.Spec.LogFileSizeMb == 0 {
+		clusterAgent.Spec.LogFileSizeMb = 5
+	}
+
+	if clusterAgent.Spec.LogFileBackups == 0 {
+		clusterAgent.Spec.LogFileBackups = 3
+	}
+
+	if clusterAgent.Spec.StdoutLogging == "" {
+		clusterAgent.Spec.StdoutLogging = "true"
+	}
+}
+
+func parseLabelField(labels []map[string]string, labelsType string) string {
+	var stringBuilder strings.Builder
+	stringBuilder.WriteString(" " + labelsType + "-labels: [")
+	for _, label := range labels {
+		for labelKey, labelValue := range label {
+			stringBuilder.WriteString(fmt.Sprintf("{ %s: %s },", labelKey, labelValue))
+		}
+	}
+	labelsString := strings.TrimRight(stringBuilder.String(), ",")
+	return labelsString
+}
+
+func parseNameField(names []string, namesType string) string {
+	var stringBuilder strings.Builder
+	stringBuilder.WriteString(" " + namesType + "-names: [")
+	for _, name := range names {
+		stringBuilder.WriteString(name + ",")
+	}
+	namesString := strings.TrimRight(stringBuilder.String(), ",")
+	return namesString
+}
+
+func createPodFilterString(clusterAgent *appdynamicsv1alpha1.Clusteragent) string {
+	var podFilterString strings.Builder
+	podFilterString.WriteString("{")
+	if clusterAgent.Spec.PodFilter.BlocklistedLabels != nil {
+		podFilterString.
+			WriteString(parseLabelField(clusterAgent.Spec.PodFilter.BlocklistedLabels, BLOCKLISTED) + "],")
+	}
+
+	if clusterAgent.Spec.PodFilter.AllowlistedLabels != nil {
+		podFilterString.
+			WriteString(parseLabelField(clusterAgent.Spec.PodFilter.AllowlistedLabels, ALLOWLISTED) + "],")
+	}
+
+	if clusterAgent.Spec.PodFilter.BlocklistedNames != nil {
+		podFilterString.
+			WriteString(parseNameField(clusterAgent.Spec.PodFilter.BlocklistedNames, BLOCKLISTED) + "],")
+	}
+
+	if clusterAgent.Spec.PodFilter.AllowlistedNames != nil {
+		podFilterString.
+			WriteString(parseNameField(clusterAgent.Spec.PodFilter.AllowlistedNames, ALLOWLISTED) + "],")
+	}
+	return strings.TrimRight(podFilterString.String(), ",") + "}"
+}
+
+func netvizInfoToMap(netvizInfo appdynamicsv1alpha1.NetvizInfo) map[string]interface{} {
+	return map[string]interface{}{
+		"bci-enabled": netvizInfo.BciEnabled,
+		"port":        netvizInfo.Port,
+	}
+}
+
+func netvizInfoToJsonString(netvizInfo appdynamicsv1alpha1.NetvizInfo) string {
+	netvizInfoMap := netvizInfoToMap(netvizInfo)
+	json, err := json.Marshal(netvizInfoMap)
+	if err != nil {
+		fmt.Printf("Failed to marshal netviz info %v, %v", netvizInfoMap, err)
+		return ""
+	}
+	return string(json)
+}
+
+func imageInfoMapToJsonString(imageInfo map[string]appdynamicsv1alpha1.ImageInfo) string {
+	imageInfoMap := make(map[string]map[string]string)
+	for language, info := range imageInfo {
+		imageInfoMap[language] = imageInfoToMap(info)
+	}
+	json, err := json.Marshal(imageInfoMap)
+	if err != nil {
+		fmt.Printf("Failed to marshal image info %v, %v", imageInfoMap, err)
+		return ""
+	}
+	return string(json)
+}
+
+func imageInfoToMap(imageInfo appdynamicsv1alpha1.ImageInfo) map[string]string {
+	return map[string]string{
+		"image":             imageInfo.Image,
+		"agent-mount-path":  imageInfo.AgentMountPath,
+		"image-pull-policy": imageInfo.ImagePullPolicy,
+	}
+}
+
+func customAgentConfigsToArrayMap(customConfigs []appdynamicsv1alpha1.CustomConfigInfo) []map[string]string {
+	out := make([]map[string]string, 0)
+	for _, customConfig := range customConfigs {
+		out = append(out, map[string]string{
+			"config-map-name": customConfig.ConfigMapName,
+			"sub-dir":         customConfig.SubDir,
+		})
+	}
+	return out
+}
+func mapToJsonString(mapToConvert []map[string]string) string {
+	valueToConvert := convertToMapOfArray(mapToConvert)
+	json, err := json.Marshal(valueToConvert)
+	if err != nil {
+		fmt.Printf("Failed to marshal label info %v, %v", valueToConvert, err)
+		return ""
+	}
+	return string(json)
+}
+
+func convertToMapOfArray(m []map[string]string) map[string][]string {
+	result := make(map[string][]string)
+	for _, label := range m {
+		for key, val := range label {
+			result[key] = append(result[key], val)
+		}
+	}
+	return result
+}
+
+func instrumentationRulesToJsonString(rules []appdynamicsv1alpha1.InstrumentationRule) string {
+	rulesOut := make([]map[string]interface{}, 0)
+	for _, rule := range rules {
+		ruleMap := map[string]interface{}{
+			"namespaces":             rule.NamespaceRegex,
+			"match-string":           rule.MatchString,
+			"label-match":            convertToMapOfArray(rule.LabelMatch),
+			"app-name":               rule.AppName,
+			"tier-name":              rule.TierName,
+			"language":               rule.Language,
+			"instrument-container":   rule.InstrumentContainer,
+			"container-match-string": rule.ContainerNameMatchString,
+			"custom-agent-config":    rule.CustomAgentConfig,
+			"env":                    rule.EnvToUse,
+			"image-info":             imageInfoToMap(rule.ImageInfo),
+			"netviz-info":            netvizInfoToMap(rule.NetvizInfo),
+			"run-as-user":            rule.RunAsUser,
+			"run-as-group":           rule.RunAsGroup,
+			"app-name-label":         rule.AppNameLabel,
+			"analytics-host":         rule.AnalyticsHost,
+			"analytics-port":         rule.AnalyticsPort,
+			"analytics-ssl-enabled":  rule.AnalyticsSslEnabled,
+			"custom-settings-info":   customAgentConfigsToArrayMap(rule.CustomConfigInfo),
+		}
+		rulesOut = append(rulesOut, ruleMap)
+	}
+	json, err := json.Marshal(rulesOut)
+	if err != nil {
+		fmt.Printf("Failed to marshal ns rules %v, %v", rulesOut, err)
+		return ""
+	}
+	return string(json)
 }

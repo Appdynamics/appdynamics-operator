@@ -1,0 +1,13 @@
+apiVersion: appdynamics.com/v1alpha1
+kind: Clustercollector
+metadata:
+  name: k8s-cluster-collector
+  namespace: appdynamics
+spec:
+  image: praksury/cluster-collector:test
+  serviceAccountName: appdynamics-cluster-agent
+  controllerUrl: "https://customer1.saas.appd-test.com"
+  account: singularity-agent@customer1
+  clusterName: "test"
+  nsToMonitorRegex: dev
+  accessSecret: 2b50fcc0-1f0c-43d6-8092-4ee4cca8f28e

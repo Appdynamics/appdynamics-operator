@@ -1,0 +1,393 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: ClusterServiceVersion
+metadata:
+  annotations:
+    alm-examples: |-
+      [
+        {
+          "apiVersion": "appdynamics.com/v1alpha1",
+          "kind": "Adam",
+          "metadata": {
+            "name": "example-adam",
+            "namespace": "appdynamics"
+          },
+          "spec": {
+          "controllerUrl": "https://saas.appdynamics.com"
+          }
+        },
+        {
+          "apiVersion": "appdynamics.com/v1alpha1",
+          "kind": "Clusteragent",
+          "metadata": {
+            "name": "k8s-cluster-agent",
+            "namespace": "appdynamics"
+          },
+          "spec": {
+            "account": "customer1",
+            "appName": "Cluster1",
+            "controllerUrl": "https://saas.appdynamics.com",
+            "stdoutLogging": "true"
+          }
+        },
+        {
+          "apiVersion": "appdynamics.com/v1alpha1",
+          "kind": "InfraViz",
+          "metadata": {
+            "name": "appd-infraviz",
+            "namespace": "appdynamics"
+          },
+          "spec": {
+            "account": "customer1",
+            "controllerUrl": "https://saas.appdynamics.com",
+            "enableDockerViz": "false",
+            "enableMasters": true,
+            "globalAccount": "customer1_12345",
+            "netVizPort": 3892,
+            "stdoutLogging": true
+          }
+        }
+      ]
+    capabilities: Basic Install
+    categories: Monitoring
+    certified: 'true'
+    createdAt: 2020-02-10 12:00:00
+    containerImage: registry.connect.redhat.com/appdynamics/cluster-agent-operator
+    description: End to end monitoring of applications on Kubernetes and OpenShift clusters with AppDynamics.
+    support: support@appdynamics.com
+    repository: https://github.com/Appdynamics/appdynamics-operator
+  name: appdynamics-operator.v0.4.1
+  namespace: placeholder
+spec:
+  apiservicedefinitions: {}
+  customresourcedefinitions:
+    owned:
+    - description: Instrumentation automation (Internal)
+      kind: Adam
+      name: adams.appdynamics.com
+      version: v1alpha1
+      displayName:  Instrumentation
+      resources:
+        - kind: Deployment
+          version: apps/v1
+        - kind: Pod
+          version: v1
+        - kind: Secret
+          version: v1
+      specDescriptors:
+        - path: controllerUrl
+          description: Url of the AppDynamics controller
+          displayName: Controller Url
+          x-descriptors:
+            - 'urn:alm:descriptor:com.tectonic.ui:text'
+        - description: Name of the secret to access the Controller. Must have controller-key key
+          displayName: Controller Access Key
+          path: accessSecret
+          x-descriptors:
+            - 'urn:alm:descriptor:io.kubernetes:core:v1:Secret'
+    - description: Agent for monitoring Kubernetes and OpenShift clusters.
+      kind: Clusteragent
+      name: clusteragents.appdynamics.com
+      version: v1alpha1
+      displayName: Cluster Agent
+      resources:
+        - kind: Deployment
+          version: apps/v1
+        - kind: Pod
+          version: v1
+        - kind: Secret
+          version: v1
+      specDescriptors:
+        - path: account
+          description: AppDynamics controller account name
+          displayName: Account
+          x-descriptors:
+            - 'urn:alm:descriptor:com.tectonic.ui:text'
+        - path: appName
+          description: Name of the cluster agent instance
+          displayName: App Name
+          x-descriptors:
+            - 'urn:alm:descriptor:com.tectonic.ui:text'
+        - path: controllerUrl
+          description: Url of the AppDynamics controller
+          displayName: Controller Url
+          x-descriptors:
+            - 'urn:alm:descriptor:com.tectonic.ui:text'
+        - path: image
+          description: Image reference
+          displayName: Image
+          x-descriptors:
+            - 'urn:alm:descriptor:com.tectonic.ui:text'
+        - path: logLevel
+          description: Level of logging (DEBUG, INFO)
+          displayName: Log Level
+          x-descriptors:
+            - 'urn:alm:descriptor:com.tectonic.ui:text'
+        - path: stdoutLogging
+          description: Directive to log to stdout
+          displayName: Stdout Logging
+          x-descriptors:
+            - 'urn:alm:descriptor:com.tectonic.ui:text'
+        - description: Name of the secret to access the Controller. Must have controller-key key
+          displayName: Controller Access Key
+          path: accessSecret
+          x-descriptors:
+            - 'urn:alm:descriptor:io.kubernetes:core:v1:Secret'
+    - description: Agent for monitoring server and network infrastructure.
+      kind: InfraViz
+      name: infravizs.appdynamics.com
+      version: v1alpha1
+      displayName: Infrastructure Visibility
+      resources:
+        - kind: Daemonset
+          version: apps/v1
+        - kind: Pod
+          version: v1
+        - kind: Secret
+          version: v1
+      specDescriptors:
+        - path: account
+          description: AppDynamics controller account name
+          displayName: Account
+          x-descriptors:
+            - 'urn:alm:descriptor:com.tectonic.ui:text'
+        - path: globalAccount
+          description: AppDynamics controller global account name
+          displayName: Global Account
+          x-descriptors:
+            - 'urn:alm:descriptor:com.tectonic.ui:text'
+        - path: controllerUrl
+          description: Url of the AppDynamics controller
+          displayName: Controller Url
+          x-descriptors:
+            - 'urn:alm:descriptor:com.tectonic.ui:text'
+        - description: Name of the secret to access the Controller. Must have controller-key key
+          displayName: Controller Access Key
+          path: accessSecret
+          x-descriptors:
+            - 'urn:alm:descriptor:io.kubernetes:core:v1:Secret'
+  description: | 
+    AppDynamics Operator simplifies the configuration and lifecycle management of the AppDynamics ClusterAgent and the AppDynamics Machine Agent on different Kubernetes distributions and OpenShift. 
+    The Operator encapsulates key operational knowledge on how to configure and upgrade the ClusterAgent and the Machine Agent. 
+    It knows, for example, which configuration changes are benign and do not require restart of the ClusterAgent, 
+    which minimizes unnecesary load on the cluster API server.
+
+
+    ## Operator deployment
+    
+    * Create namespace for AppDynamics
+    ```
+      kubectl create namespace appdynamics
+    ```
+
+    * Create Secret `cluster-agent-secret`. Set "controller-key" 
+    to the access key to the AppDynamics controller.  
+
+    ```
+    kubectl -n appdynamics create secret generic cluster-agent-secret --from-literal=controller-key="<controller-access-key>"
+    ```
+
+    * Update the image reference in the Operator deployment spec, if necessary.  
+
+    For additional details refer to [this documentation](https://github.com/Appdynamics/appdynamics-operator)
+  displayName: Appdynamics Operator
+  icon:
+    - base64data: >-
+        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uuvuzKycP9/zl44dO+/evZfqWazq6pqTTjr5lVdeDcWgf9573/2m6Vi77meqh8/v1+8GKSWkJKIl334HAEsXfxMI8esLvs/bHimiIiyd0IqKyuys3CefeIKI/vrXh1q1yq+qqqJ62ZABYX2Xm9fif/9bSER1dZ7amhoimj9/Xl6Llut+1vWXICKfz5+Tk3f77XcQUW1trcfjEUKWlpYAwKsvv0JEtrB1yDv/fPfAAQOVUkLYtm17PB4imjBhAgD89NNaCtY72m4NHnROm4J2ilSPM/u3KSjw+HyhFCql9Ht8wUUXXz7sqjfe/C8AfDx9jk78Aw890r376f59haUTMG/+As6tb75ZQkS9eva+5JJLiUgKEXqYOtiTT/7D7U6uqq7p0KHDb7p1J6JPZ84EgMnvT5728cdt2rTduzcgLJ2Mqqrqrl1/FZa+aVV1TVZ2ziOPPkZEXo9HSiGlDEiKSN9RKklEZeUVrdp06H5az2+/XVZeUblfmiNOpJtsABA83mjM2DF13robb7oZAG697daioqL3J0+B+tv262YlAQJmZGYAgMvldCclAcDoseMs02yT3xrquRWkFG63CwDcbrfT6eScffXVIgDo0q1bILJghIAMETnnnBumZQLAWWedlZ/fduPGjRDoCqE+ivK/b7/p8dT1OPO8X35e+86YMU7L0puw6zvq+JCouKzsT7ff+tsLLhlx5bAtm7cAAAkJB5y/q3cMfOXlV3v16tG375kAcM89d8+cPXftuvWM89AJTUQEAIxxr7fO6XB88sn0H9f9/OAjf//TXX8959zzhl85vLi4pH43p16v7deulo5k+/atbrfrwgt+CwCGaTLGGWOGwYko1KVkyJQSGelpkye8K2z/2WcPGDRwYK8zel9zzXXLvv2O81DgSBL5LU2IyDAMn8/72quv333PPa1btwKADu3b3XPvfS+9/MYtN9+kc4KIoUKSCt58a2Sb/BZ+r9dyOJcuXznj46nPv/RyUpJbBg+GELbIyMhetuy7F174V22NxzB5aWnZK2+MGn71tecOHgSkGGOBJ/frI0FEQEIAUET7nbjEGRNCdu7c+cUXX7r+umueePLZIeecI4QwjHorklHHwjgCAHw87YMevXoNHXr+hl/WW06nEqp+J1cpxThbtWr1ggXzFnz+hf5wxB+ueuZfL4waPfo/L71A+zmoiDjnNTVV3bqd8tRzzz76wH2/6X7G+AnjAIAhYr3jUnVxBRITvJ2ODQFJQfCoYQxsOLmPo4SAgDFDStn/7P7ff79mzZrVm7Zs/WHN9x9/8knvM/uOGf3fP954g5QiuBQ7Mq6HyAtLKcm5MfWj6Vu3bhZSjRk9ts7jTUpyCyE2//LLzJmfXXTRBUqp4L6rQECAMG3azLoaLyCaFjvjjO6Tp0wefsVwIgq+TyCVSE1LXrdh25qnX0dEoWSnTgXPPfP3u+78MwBIII4cyAbgAFzXY0REBFJKh8Ox8H8Ld+/a0blzJ6hnAPQxOWeeeQYAnNGze/Cr/UuWgJAxAHA4HDM/ndW+Q7sbb7qzoE2eYfL6h6bqdL72+mtWavb3q1b89OMPPttOS05uW1AwYcLkhx+8Pzc3T4cJKQwAODcB4JH7712+aOEfrr6uRW4eACDD+ibkoH4m/b61a9feb9szZkzv36+PEDYYJgIRkN4LnkifioC6JPUn3bt37969++WXXfrEE3+74qo/3P/Ao1eNuMrlclBjfG8NEmFhEZF+Wm+MeqdNhxOXLV701ZdfIAKRSnInZ+fmjh49+qKLLkAM1EcAgIAGx2nTJp515pm2LTg3tEuF9j3f0WE5du3YOfzKYa+/+pptC854wIwAECmOPPSmIgnTNBkLGB7DMHbv3vPII4/0OatP165dKeg2DD1dv88LAD6/Hw4BIhqcA4DP52vXts0Hk6eMGHHTCV06ZmYmyWC1rl+VnzdumvLRnBM7t504eYqwBSACkmkml1f4Jk6cfO+9d0sp9aldAAAIoaNZFNGHUz/kiFIIbhghKR8kKcEyQUQppdvtuvWWm5966rnhw4f37HF6KGBNTa1pmg6HRURECpGtXbvum8VLbrnpjzqAVJIz3ueMXh9Onur1elwu50FuFwYRFpYu3y++/HrJ13NnTP/04osvEkIAQ5JkmsZ77713/fXXr1y5+vTTuyul9HEyiOj320pKAGAMGQNSpEjtv0kGom3bts+vL2EcAEhKFdz4QKuEAQBwY1dh2aT3J/u8PsbYzp07XnzxJcuyxr7zDoSqlX0iNgBACi2RfZsaBIAgpaqu8QCAaZq2LYYN+/2ePXvu+cv9fXqfGdqGWct08sT3vbXlH09d1LZtOykUMhBKWYZxw403v/zKy7feerPb7f7VXBH4fD6lBAAAKR5wvQIAMECf16f2PUMKAaUQ/novgM7IY489tnTp8l69znrmmScuvPASp8P6bsWKhx588Oabb/rb3x5XSgEQ52zHjm233nzzV19+9eCDfylo204J+b+FC//y0MNXDh+WkZFRz/cbISii6L7G8OHDe/XqfeC3Pp//tNN6XHttwCUYcpB26XLSzz+vJyIhxX5d31Cfv67Oc9JJJ7/66mtUr0+0HzrC++5/yHKmsOBpM7l5+X/605+3b99OB/SAdG9r1ao1LVu2XrFi5YEB9F1+97vf33LbHUQkhQh1Fa+++trevc/SrgcZdIq2b9f+wYceCn1CRLpG/vbbFQAwadJECnjCbCJ66ulnTzutR8AjRaQPL9B/vv32yN69z6ypqaV6JVBRUdGzZ88PPvigfvz6F6/X+9BDj7jdyVnZufltChD5JZdcumrVqlAWdLAZn85s1So/PT2z++k9TznlVKfTffnlvw/1PSmiRH5Ix7btHTt2ZmZmpqenKaVC5oGIGGMlJaWVlRVt27Y1DIOIELGmpramprZFi1w6bB0vhCguLsnNzWlwu5+iouK62lrL4UQkIkpLz0hyu+DQWwXV1dVVV9fk5R08AUqpwsLCzMwsXa3o9oq2snv3FrZu3TLUF6mpqdm7d0/Llq2SkpLqZxyRlMJdO3cbJtOjMQCAiEVFJaZpZGSk17+v/r2kpAQAsrOz639l23ZxcVGLFi0PNQJYWlq2fv0627bbtm3frl3bUGz1Y/b6/D/+8ENRYZHlsDp06NChQ/v9gkWKyAsrxIHJPcwnR563hkLSga1veQSD0A1Fuw+Hz9p+3xIRAOm21IG3O8x9D/rVodRPweZ56BM4YJLIga/WQYNFhKgISymFeIgeFpEumv2K/kge6pEH0/dBRN0DOPxVFDQhh4qfiA7smREREex3/GooKtgfUiqQ6/qSAgjd8YjiUYed9EFBsKFpM6E/oyEpTVSEdbyxnyIPKtCgV6kRdqixRCSSSJEQVoKoEC1LmOA4JyGsBFEhIawEUSEhrARRISGsBFEhIawEUSEhrARRISGsBFEhIawEUSEhrARRISGsBFEhIawEUSEhrARRISGsBFEhIawEUSEhrARR4f8BfBlQ63swDuoAAAAldEVYdGRhdGU6Y3JlYXRlADIwMTgtMDMtMDFUMTM6MDM6MTgrMDA6MDD6sxa1AAAAJXRFWHRkYXRlOm1vZGlmeQAyMDE4LTAzLTAxVDEzOjAzOjE4KzAwOjAwi+6uCQAAAABJRU5ErkJggg==
+      mediatype: image/png
+  install:
+    spec:
+      clusterPermissions:
+      - rules:
+        - apiGroups:
+          - ""
+          resources:
+          - pods
+          - pods/log
+          - endpoints
+          - persistentvolumeclaims
+          - resourcequotas
+          - nodes
+          - events
+          - namespaces
+          verbs:
+          - get
+          - watch
+          - list
+        - apiGroups:
+          - ""
+          resources:
+          - services
+          - configmaps
+          - secrets
+          verbs:
+          - "*"
+        - apiGroups:
+          - apps
+          resources:
+          - statefulsets
+          verbs:
+          - get
+          - watch
+          - list
+        - apiGroups:
+          - apps
+          resources:
+          - deployments
+          - replicasets
+          - daemonsets
+          verbs:
+          - "*"
+        - apiGroups: 
+          - "batch"
+          - "extensions"
+          resources: 
+          - "jobs"
+          verbs: 
+          - "get"
+          - "list"
+          - "watch"
+        - apiGroups:
+          - metrics.k8s.io
+          resources:
+          - pods
+          - nodes
+          verbs:
+          - get
+          - list
+          - watch
+        - apiGroups:
+          - appdynamics.com
+          resources:
+          - '*'
+          - clusteragents
+          verbs:
+          - "*"
+        serviceAccountName: appdynamics-operator
+      - rules:
+        - apiGroups:
+          - ""
+          resources:
+          - pods
+          - pods/log
+          - endpoints
+          - persistentvolumeclaims
+          - resourcequotas
+          - nodes
+          - events
+          - namespaces
+          - services
+          - configmaps
+          - secrets
+          verbs:
+          - get
+          - watch
+          - list
+        - apiGroups:
+          - apps
+          resources:
+          - statefulsets
+          - deployments
+          - replicasets
+          - daemonsets
+          verbs:
+          - get
+          - watch
+          - list
+        - apiGroups: 
+          - "batch"
+          - "extensions"
+          resources: 
+          - "jobs"
+          verbs: 
+          - "get"
+          - "list"
+          - "watch"
+        - apiGroups:
+          - metrics.k8s.io
+          resources:
+          - pods
+          - nodes
+          verbs:
+          - get
+          - list
+          - watch
+        serviceAccountName: appdynamics-infraviz
+      - rules:
+        - verbs:
+          - use
+          apiGroups:
+          - security.openshift.io
+          resources:
+          - securitycontextconstraints
+          resourceNames:
+          - hostnetwork
+          - privileged
+          - hostaccess
+        serviceAccountName: appdynamics-infraviz
+      deployments:
+      - name: appdynamics-operator
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              name: appdynamics-operator
+          strategy: {}
+          template:
+            metadata:
+              labels:
+                name: appdynamics-operator
+            spec:
+              containers:
+              - command:
+                - appdynamics-operator
+                env:
+                - name: WATCH_NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.annotations['olm.targetNamespaces']
+                - name: POD_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.name
+                - name: OPERATOR_NAME
+                  value: appdynamics-operator
+                image: registry.connect.redhat.com/appdynamics/cluster-agent-operator:0.4.1
+                imagePullPolicy: Always
+                name: appdynamics-operator
+                ports:
+                - containerPort: 60000
+                  name: metrics
+                resources:
+                  limits:
+                    cpu: 200m
+                    memory: 128Mi
+                  requests:
+                    cpu: 100m
+                    memory: 64Mi
+              serviceAccountName: appdynamics-operator
+    strategy: deployment
+  installModes:
+  - supported: true
+    type: OwnNamespace
+  - supported: true
+    type: SingleNamespace
+  - supported: false
+    type: MultiNamespace
+  - supported: true
+    type: AllNamespaces
+  keywords: ['appdynamics', 'monitoring', 'e2e visibility', 'aiops']
+  maintainers:
+  - name: AppDynamics
+    email: support@appdynamics.com
+  maturity: alpha
+  links:
+    - name: AppDynamics Cluster Agent Overview
+      url: https://docs.appdynamics.com/display/PRO45/Monitoring+Kubernetes+with+the+Cluster+Agent
+    - name: AppDynamics Kubernetes Monitoring Overview
+      url: https://www.appdynamics.com/cloud-monitoring/kubernetes-monitoring/
+    - name: Operator Deployment Guide
+      url: https://github.com/Appdynamics/appdynamics-operator
+  provider:
+    name: AppDynamics LLC
+  replaces: appdynamics-operator.v0.4.0
+  version: 0.4.1

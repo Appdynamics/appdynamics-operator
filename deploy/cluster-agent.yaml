@@ -1,0 +1,95 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: appdynamics-cluster-agent
+  namespace: appdynamics
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: appdynamics-cluster-agent
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+      - pods/log
+      - endpoints
+      - persistentvolumeclaims
+      - resourcequotas
+      - nodes
+      - events
+      - namespaces
+      - services
+      - configmaps
+      - secrets
+    verbs:
+      - get
+      - watch
+      - list
+  - apiGroups:
+      - apps
+    resources:
+      - daemonsets
+      - statefulsets
+      - deployments
+      - replicasets
+    verbs:
+      - get
+      - watch
+      - list
+  - apiGroups:
+      - "batch"
+      - "extensions"
+    resources:
+      - "jobs"
+    verbs:
+      - "get"
+      - "list"
+      - "watch"
+  - apiGroups:
+      - metrics.k8s.io
+    resources:
+      - pods
+      - nodes
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - appdynamics.com
+    resources:
+      - '*'
+      - clusteragents
+    verbs:
+      - get
+      - list
+      - watch
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: appdynamics-cluster-agent
+subjects:
+  - kind: ServiceAccount
+    name: appdynamics-cluster-agent
+    namespace: appdynamics
+roleRef:
+  kind: ClusterRole
+  name: appdynamics-cluster-agent
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: appdynamics.com/v1alpha1
+kind: Clusteragent
+metadata:
+  name: k8s-cluster-agent
+  namespace: appdynamics
+spec:
+  controllerUrl: "https://<account>.saas.appdynamics.com"
+  account: "customer1"
+  appName: "<ClusterName>"
+  serviceAccountName: appdynamics-cluster-agent
+  logLevel: "INFO"
+  image: "docker.io/appdynamics/cluster-agent:latest"
+  stdoutLogging: "true"
+  nsToMonitor: [appdynamics,default,dev]

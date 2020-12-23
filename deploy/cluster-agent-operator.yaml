@@ -17,6 +17,49 @@ spec:
 apiVersion: apiextensions.k8s.io/v1beta1
 kind: CustomResourceDefinition
 metadata:
+  name: clustercollectors.appdynamics.com
+spec:
+  group: appdynamics.com
+  names:
+    kind: Clustercollector
+    listKind: ClustercollectorList
+    plural: clustercollectors
+    singular: clustercollector
+  scope: Namespaced
+  validation:
+    openAPIV3Schema:
+      description: Clustercollector is the Schema for the clustercollectors API
+      properties:
+        apiVersion:
+          description: 'APIVersion defines the versioned schema of this representation
+              of an object. Servers should convert recognized schemas to the latest
+              internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/api-conventions.md#resources'
+          type: string
+        kind:
+          description: 'Kind is a string value representing the REST resource this
+              object represents. Servers may infer this from the endpoint the client
+              submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/api-conventions.md#types-kinds'
+          type: string
+        metadata:
+          type: object
+        spec:
+          description: ClustercollectorSpec defines the desired state of Clustercollector
+          properties:
+            image:
+              type: string
+            serviceAccountName:
+              type: string
+  subresources:
+    status: {}
+  version: v1alpha1
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+---
+apiVersion: apiextensions.k8s.io/v1beta1
+kind: CustomResourceDefinition
+metadata:
   name: infravizs.appdynamics.com
 spec:
   group: appdynamics.com
@@ -28,30 +71,11 @@ spec:
   scope: Namespaced
   subresources:
     status: {}
-  validation:
-    openAPIV3Schema:
-      properties:
-        apiVersion:
-          description: 'APIVersion defines the versioned schema of this representation
-            of an object. Servers should convert recognized schemas to the latest
-            internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/api-conventions.md#resources'
-          type: string
-        kind:
-          description: 'Kind is a string value representing the REST resource this
-            object represents. Servers may infer this from the endpoint the client
-            submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/api-conventions.md#types-kinds'
-          type: string
-        metadata:
-          type: object
-        spec:
-          type: object
-        status:
-          type: object
   version: v1alpha1
   versions:
-  - name: v1alpha1
-    served: true
-    storage: true
+    - name: v1alpha1
+      served: true
+      storage: true
 ---
 apiVersion: apiextensions.k8s.io/v1beta1
 kind: CustomResourceDefinition
@@ -67,30 +91,11 @@ spec:
   scope: Namespaced
   subresources:
     status: {}
-  validation:
-    openAPIV3Schema:
-      properties:
-        apiVersion:
-          description: 'APIVersion defines the versioned schema of this representation
-            of an object. Servers should convert recognized schemas to the latest
-            internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/api-conventions.md#resources'
-          type: string
-        kind:
-          description: 'Kind is a string value representing the REST resource this
-            object represents. Servers may infer this from the endpoint the client
-            submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/api-conventions.md#types-kinds'
-          type: string
-        metadata:
-          type: object
-        spec:
-          type: object
-        status:
-          type: object
   version: v1alpha1
   versions:
-  - name: v1alpha1
-    served: true
-    storage: true
+    - name: v1alpha1
+      served: true
+      storage: true
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -98,171 +103,92 @@ metadata:
   name: appdynamics-operator
   namespace: appdynamics
 ---
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: appdynamics-infraviz
-  namespace: appdynamics
----
-apiVersion: policy/v1beta1
-kind: PodSecurityPolicy
-metadata:
-  name: appdynamics-infraviz
-  annotations:
-    seccomp.security.alpha.kubernetes.io/allowedProfileNames: '*'
-spec:
-  privileged: true
-  allowPrivilegeEscalation: true
-  allowedCapabilities:
-  - '*'
-  volumes:
-  - '*'
-  hostNetwork: true
-  hostIPC: true
-  hostPID: true
-  hostPorts:
-  - min: 0
-    max: 65535
-  runAsUser:
-    rule: 'RunAsAny'
-  seLinux:
-    rule: 'RunAsAny'
-  supplementalGroups:
-    rule: 'RunAsAny'
-  fsGroup:
-    rule: 'RunAsAny'
----
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  creationTimestamp: null
-  name: appdynamics-operator
-rules:
-- apiGroups:
-  - ""
-  resources:
-  - pods
-  - pods/log
-  - services
-  - endpoints
-  - persistentvolumeclaims
-  - events
-  - configmaps
-  - secrets
-  - resourcequotas
-  - nodes
-  verbs:
-  - '*'
-- apiGroups:
-  - ""
-  resources:
-  - namespaces
-  verbs:
-  - get
-  - watch
-  - list
-- apiGroups:
-  - ""
-  resources:
-  - pods/exec
-  verbs:
-  - create
-- apiGroups:
-  - apps
-  resources:
-  - deployments
-  - daemonsets
-  - replicasets
-  - statefulsets
-  verbs:
-  - '*'
-- apiGroups: 
-  - "batch"
-  - "extensions"
-  resources: 
-  - "jobs"
-  verbs: 
-  - "get"
-  - "list"
-  - "watch"
-- apiGroups:
-  - monitoring.coreos.com
-  resources:
-  - servicemonitors
-  verbs:
-  - get
-  - create
-- apiGroups:
-  - metrics.k8s.io
-  resources:
-  - pods
-  - nodes
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - appdynamics.com
-  resources:
-  - '*'
-  - clusteragents
-  verbs:
-  - '*'
----
-kind: ClusterRoleBinding
-apiVersion: rbac.authorization.k8s.io/v1
-metadata:
-  name: appdynamics-operator
-subjects:
-- kind: ServiceAccount
-  name: appdynamics-operator
-  namespace: appdynamics  
-roleRef:
-  kind: ClusterRole
-  name: appdynamics-operator
-  apiGroup: rbac.authorization.k8s.io
----
-kind: ClusterRoleBinding
-apiVersion: rbac.authorization.k8s.io/v1
-metadata:
-  name: appdynamics-infraviz
-subjects:
-- kind: ServiceAccount
-  name: appdynamics-infraviz
-  namespace: appdynamics  
-roleRef:
-  kind: ClusterRole
-  name: appdynamics-operator
-  apiGroup: rbac.authorization.k8s.io
----
 kind: Role
-apiVersion: rbac.authorization.k8s.io/v1
 metadata:
-  name: appdynamics-infraviz
+  name: appdynamics-operator
   namespace: appdynamics
 rules:
-- apiGroups:
-  - extensions
-  resources:
-  - podsecuritypolicies
-  resourceNames:
-  - appdynamics-infraviz
-  verbs:
-  - use
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+      - pods/log
+      - endpoints
+      - persistentvolumeclaims
+      - resourcequotas
+      - nodes
+      - events
+      - namespaces
+    verbs:
+      - get
+      - watch
+      - list
+  - apiGroups:
+      - ""
+    resources:
+      - services
+      - configmaps
+      - secrets
+    verbs:
+      - "*"
+  - apiGroups:
+      - apps
+    resources:
+      - statefulsets
+    verbs:
+      - get
+      - watch
+      - list
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+      - replicasets
+      - daemonsets
+    verbs:
+      - "*"
+  - apiGroups:
+      - "batch"
+      - "extensions"
+    resources:
+      - "jobs"
+    verbs:
+      - "get"
+      - "list"
+      - "watch"
+  - apiGroups:
+      - metrics.k8s.io
+    resources:
+      - pods
+      - nodes
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - appdynamics.com
+    resources:
+      - '*'
+      - clusteragents
+      - infravizs
+      - adams
+      - clustercollectors
+    verbs:
+      - "*"
 ---
-apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
 metadata:
-  name: appdynamics-infraviz
+  name: appdynamics-operator
   namespace: appdynamics
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: appdynamics-infraviz
 subjects:
-- kind: ServiceAccount
-  name: appdynamics-infraviz
-  namespace: appdynamics
+  - kind: ServiceAccount
+    name: appdynamics-operator
+roleRef:
+  kind: Role
+  name: appdynamics-operator
+  apiGroup: rbac.authorization.k8s.io
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -282,12 +208,12 @@ spec:
       serviceAccountName: appdynamics-operator
       containers:
         - name: appdynamics-operator
-          image: docker.io/appdynamics/cluster-agent-operator:latest
+          image: docker.io/appdynamics/cluster-agent-operator:0.6.3
           ports:
-          - containerPort: 60000
-            name: metrics
+            - containerPort: 60000
+              name: metrics
           command:
-          - appdynamics-operator
+            - appdynamics-operator
           imagePullPolicy: Always
           resources:
             limits:
@@ -298,13 +224,133 @@ spec:
               memory: 64Mi
           env:
             - name: WATCH_NAMESPACE
-              value: ""
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             - name: POD_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
             - name: OPERATOR_NAME
               value: "appdynamics-operator"
-
-
-
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: appdynamics-cluster-agent
+  namespace: appdynamics
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: appdynamics-cluster-agent
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+      - pods/log
+      - endpoints
+      - persistentvolumeclaims
+      - resourcequotas
+      - nodes
+      - events
+      - namespaces
+      - services
+      - configmaps
+      - secrets
+    verbs:
+      - get
+      - watch
+      - list
+  - apiGroups:
+      - apps
+    resources:
+      - daemonsets
+      - statefulsets
+      - deployments
+      - replicasets
+    verbs:
+      - get
+      - watch
+      - list
+  - apiGroups:
+      - "batch"
+      - "extensions"
+    resources:
+      - "jobs"
+    verbs:
+      - "get"
+      - "list"
+      - "watch"
+  - apiGroups:
+      - metrics.k8s.io
+    resources:
+      - pods
+      - nodes
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - appdynamics.com
+    resources:
+      - '*'
+      - clusteragents
+      - clustercollectors
+    verbs:
+      - get
+      - list
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: appdynamics-cluster-agent-instrumentation
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+      - pods/exec
+      - secrets
+      - configmaps
+    verbs:
+      - create
+      - update
+      - delete
+  - apiGroups:
+      - apps
+    resources:
+      - daemonsets
+      - statefulsets
+      - deployments
+      - replicasets
+    verbs:
+      - update
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: appdynamics-cluster-agent
+subjects:
+  - kind: ServiceAccount
+    name: appdynamics-cluster-agent
+    namespace: appdynamics
+roleRef:
+  kind: ClusterRole
+  name: appdynamics-cluster-agent
+  apiGroup: rbac.authorization.k8s.io
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: appdynamics-cluster-agent-instrumentation
+subjects:
+  - kind: ServiceAccount
+    name: appdynamics-cluster-agent
+    namespace: appdynamics
+roleRef:
+  kind: ClusterRole
+  name: appdynamics-cluster-agent-instrumentation
+  apiGroup: rbac.authorization.k8s.io

@@ -3,5 +3,23 @@ kind: Adam
 metadata:
   name: example-adam
 spec:
-  # Add fields here
-  size: 3
+  controllerUrl: "https://saas.appdynamics.com:443"
+  image: "docker.io/appdynamics/cluster-agent:preview-0.3.1"
+  logLevel: "info"
+  instrumentationMethod: "mountEnv"
+  nsToInstrument:
+  - dev 
+  appName: "AppViz" 
+  appNameLiteral: "JavaApp"
+  netVizPort: 3892
+  biqService: "proxy"
+  instrumentRule:
+  - namespaces:
+    - dev    
+    method: mountEnv
+    matchString:
+    - ai
+    - world
+    - loan
+    - player
+    - api

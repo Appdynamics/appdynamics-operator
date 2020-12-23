@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 
 	appdynamicsv1alpha1 "github.com/Appdynamics/appdynamics-operator/pkg/apis/appdynamics/v1alpha1"
 	"github.com/Appdynamics/appdynamics-operator/version"
@@ -39,12 +40,14 @@ const (
 	AGENT_NETVIZ_CONFIG_NAME  string = "netviz-config"
 	BIQPORT                   int32  = 9090
 	OLD_SPEC                  string = "old-infraviz"
-)
+	OS_LINUX                  string = "linux"
+	OS_WINDOWS                string = "windows"
+	OS_ALL                    string = "all"
+	UNIQUE_ID_FROM_HOST_IP    string = "status.hostIP"
+	UNIQUE_ID_FROM_HOST_NAME  string = "spec.nodeName"
 
-/**
-* USER ACTION REQUIRED: This is a scaffold file intended for the user to modify with their own Controller
-* business logic.  Delete these comments after modifying this file.*
- */
+//	SYSLOG_PORT               int32  = 5144
+)
 
 // Add creates a new InfraViz Controller and adds it to the Manager. The Manager will set fields on the Controller
 // and Start it when the Manager is Started.
@@ -71,7 +74,6 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 		return err
 	}
 
-	// TODO(user): Modify this to be the types you create that are owned by the primary resource
 	// Watch for changes to secondary resource Pods and requeue the owner InfraViz
 	err = c.Watch(&source.Kind{Type: &appsv1.DaemonSet{}}, &handler.EnqueueRequestForOwner{
 		IsController: true,
@@ -90,8 +92,14 @@ var _ reconcile.Reconciler = &ReconcileInfraViz{}
 type ReconcileInfraViz struct {
 	// This client, initialized using mgr.Client() above, is a split client
 	// that reads objects from the cache and writes to the apiserver
-	client client.Client
-	scheme *runtime.Scheme
+	client          client.Client
+	scheme          *runtime.Scheme
+	addNodeSelector bool
+}
+
+func NewReconcileInfraViz(mgr manager.Manager) ReconcileInfraViz {
+	riv := ReconcileInfraViz{client: mgr.GetClient(), scheme: mgr.GetScheme()}
+	return riv
 }
 
 // Reconcile reads that state of the cluster for a InfraViz object and makes changes based on the state read
@@ -121,53 +129,96 @@ func (r *ReconcileInfraViz) Reconcile(request reconcile.Request) (reconcile.Resu
 
 	r.scheme.Default(infraViz)
 
+	r.addNodeSelector = infraViz.Spec.NodeOS != ""
+	if infraViz.Spec.NodeOS == OS_ALL {
+		//create 2 daemonsets, one for linux and another for windows nodes
+		return r.ReconcileMixed(request, infraViz)
+	}
+
+	_, errReconcile := r.ReconcileDaemon(request, infraViz)
+	if errReconcile != nil {
+		return reconcile.Result{}, fmt.Errorf("Unable to reconcile daemonset. %v", errReconcile)
+	}
+
+	r.updateStatus(infraViz)
+
+	return reconcile.Result{RequeueAfter: 60 * time.Second}, nil
+}
+
+func (r *ReconcileInfraViz) ReconcileMixed(request reconcile.Request, infraViz *appdynamicsv1alpha1.InfraViz) (reconcile.Result, error) {
+
+	infravizLin := infraViz.DeepCopy()
+	infravizLin.Spec.NodeOS = OS_LINUX
+
+	_, err := r.ReconcileDaemon(request, infravizLin)
+	if err != nil {
+		return reconcile.Result{}, fmt.Errorf("Unable to reconcile daemonset for Linux nodes. %v", err)
+	}
+
+	infravizWin := infraViz.DeepCopy()
+	infravizWin.Spec.NodeOS = OS_WINDOWS
+
+	_, errWin := r.ReconcileDaemon(request, infravizWin)
+	if errWin != nil {
+		return reconcile.Result{}, fmt.Errorf("Unable to reconcile daemonset for Windows nodes. %v", errWin)
+	}
+
+	r.updateStatusMixed(infraViz, infravizLin, infravizWin)
+
+	return reconcile.Result{}, nil
+}
+
+func (r *ReconcileInfraViz) ReconcileDaemon(request reconcile.Request, infraViz *appdynamicsv1alpha1.InfraViz) (reconcile.Result, error) {
+	dsName := getDaemonName(infraViz)
+
 	desiredDS := r.newInfraVizDaemonSet(infraViz)
 
 	// Set InfraViz instance as the owner and controller
 	if err := controllerutil.SetControllerReference(infraViz, desiredDS, r.scheme); err != nil {
+		log.Error(err, "Unable to set owner reference on daemonset", "Namespace", infraViz.Namespace, "Name", dsName)
 		return reconcile.Result{}, err
 	}
 
 	// Check if the Daemonset already exists
 	existingDs := &appsv1.DaemonSet{}
-	err = r.client.Get(context.TODO(), types.NamespacedName{Name: infraViz.Name, Namespace: infraViz.Namespace}, existingDs)
+	createDS := false
+	err := r.client.Get(context.TODO(), types.NamespacedName{Name: dsName, Namespace: infraViz.Namespace}, existingDs)
 	if err != nil && errors.IsNotFound(err) {
-		reqLogger.Info("Creating a new Daemon Set", "Namespace", infraViz.Namespace, "Name", infraViz.Name)
-		fmt.Printf("Spec: %v\n")
-		err = r.client.Create(context.TODO(), desiredDS)
-		if err != nil {
-			return reconcile.Result{}, err
-		}
-
-		return reconcile.Result{}, nil
+		createDS = true
 	} else if err != nil {
+		log.Error(err, "Unable to load daemonset", "Namespace", infraViz.Namespace, "Name", dsName)
 		return reconcile.Result{}, err
 	}
 
 	//if any breaking changes, restart ds
-	hasBreakingChanges, errConf := r.ensureConfigMap(infraViz, existingDs)
+	hasBreakingChanges, errConf := r.validate(infraViz, existingDs, createDS)
 	if errConf != nil {
+		log.Error(errConf, "Unable to validate", "Namespace", infraViz.Namespace, "Name", dsName)
 		return reconcile.Result{}, errConf
 	}
 
 	if hasBreakingChanges {
+		log.Info("Breaking changes detected. Updating...")
 		err = r.client.Update(context.TODO(), desiredDS)
 		if err != nil {
+			log.Error(err, "Unable to update breaking changes", "Namespace", infraViz.Namespace, "Name", dsName)
 			return reconcile.Result{}, err
 		}
 		err := r.restartDaemonSet(infraViz)
 		if err != nil {
+			log.Error(err, "Unable to restart after breaking changes", "Namespace", infraViz.Namespace, "Name", dsName)
 			return reconcile.Result{}, err
 		}
 	}
 
-	if hasDSpecChanged(&existingDs.Spec, &desiredDS.Spec, &infraViz.Spec) {
-		err = r.client.Update(context.TODO(), desiredDS)
+	if createDS {
+		log.Info("Creating a new Daemon Set", "Namespace", infraViz.Namespace, "Name", dsName)
+		err = r.client.Create(context.TODO(), desiredDS)
 		if err != nil {
+			log.Error(err, "Unable to create daemonset", "Namespace", infraViz.Namespace, "Name", dsName)
 			return reconcile.Result{}, err
 		}
 	}
-	r.updateStatus(infraViz)
 
 	return reconcile.Result{}, nil
 }
@@ -178,7 +229,7 @@ func (r *ReconcileInfraViz) updateStatus(infraViz *appdynamicsv1alpha1.InfraViz)
 
 	podList, err := r.getInfraVizPods(infraViz)
 	if err != nil {
-		return fmt.Errorf("Unable to update InfraViz status. %v", err)
+		return fmt.Errorf("Unable to list pods of the  InfraViz daemonset. %v", err)
 	}
 
 	infraViz.Status.Nodes = make(map[string]string)
@@ -193,24 +244,69 @@ func (r *ReconcileInfraViz) updateStatus(infraViz *appdynamicsv1alpha1.InfraViz)
 	infraViz.Status = appdynamicsv1alpha1.InfraVizStatus{}
 
 	if errInstance := r.client.Update(context.TODO(), infraViz); errInstance != nil {
-		return fmt.Errorf("Unable to update clusteragent instance. %v", errInstance)
+		return fmt.Errorf("Unable to update InfraViz instance. %v", errInstance)
 	}
 	log.Info("InfraViz instance updated successfully", "infraViz.Namespace", infraViz.Namespace, "Date", infraViz.Status.LastUpdateTime)
 
 	infraViz.Status = updatedStatus
 	err = r.client.Status().Update(context.TODO(), infraViz)
 	if err != nil {
-		log.Error(err, "Failed to update cluster agent status", "infraViz.Namespace", infraViz.Namespace, "infraViz.Name", infraViz.Name)
+		log.Error(err, "Failed to update InfraViz status", "infraViz.Namespace", infraViz.Namespace, "infraViz.Name", infraViz.Name)
 	} else {
 		log.Info("InfraViz status updated successfully", "infraViz.Namespace", infraViz.Namespace, "Date", infraViz.Status.LastUpdateTime)
 	}
 	return err
 }
 
-func (r *ReconcileInfraViz) ensureConfigMap(infraViz *appdynamicsv1alpha1.InfraViz, existingDS *appsv1.DaemonSet) (bool, error) {
-	breakingChanges := false
+func (r *ReconcileInfraViz) updateStatusMixed(infraViz *appdynamicsv1alpha1.InfraViz, infraVizLin *appdynamicsv1alpha1.InfraViz, infraVizWin *appdynamicsv1alpha1.InfraViz) error {
+	infraViz.Status.LastUpdateTime = metav1.Now()
+	infraViz.Status.Version = version.Version
 
-	if existingDS.Annotations != nil {
+	podListLin, errLin := r.getInfraVizPods(infraVizLin)
+	if errLin != nil {
+		return fmt.Errorf("Unable to list pods of the Linux Daemonset. %v", errLin)
+	}
+
+	podListWin, errWin := r.getInfraVizPods(infraVizWin)
+	if errWin != nil {
+		return fmt.Errorf("Unable to list pods of the Windows Daemonset. %v", errWin)
+	}
+
+	infraViz.Status.Nodes = make(map[string]string)
+	for _, pod := range podListLin.Items {
+		name := pod.Name
+		status := pod.Status.Phase
+		infraViz.Status.Nodes[name] = string(status)
+	}
+
+	for _, pod := range podListWin.Items {
+		name := pod.Name
+		status := pod.Status.Phase
+		infraViz.Status.Nodes[name] = string(status)
+	}
+
+	updatedStatus := infraViz.Status
+
+	infraViz.Status = appdynamicsv1alpha1.InfraVizStatus{}
+
+	if errInstance := r.client.Update(context.TODO(), infraViz); errInstance != nil {
+		return fmt.Errorf("Unable to update InfraViz instance. %v", errInstance)
+	}
+	log.Info("InfraViz instance updated successfully", "infraViz.Namespace", infraViz.Namespace, "Date", infraViz.Status.LastUpdateTime)
+
+	infraViz.Status = updatedStatus
+	err := r.client.Status().Update(context.TODO(), infraViz)
+	if err != nil {
+		log.Error(err, "Failed to update InfraViz status", "infraViz.Namespace", infraViz.Namespace, "infraViz.Name", infraViz.Name)
+	} else {
+		log.Info("InfraViz status updated successfully", "infraViz.Namespace", infraViz.Namespace, "Date", infraViz.Status.LastUpdateTime)
+	}
+	return err
+}
+
+func (r *ReconcileInfraViz) validate(infraViz *appdynamicsv1alpha1.InfraViz, existingDS *appsv1.DaemonSet, newDS bool) (bool, error) {
+	breakingChanges := false
+	if !newDS && existingDS.Annotations != nil {
 		if oldJson, ok := existingDS.Annotations[OLD_SPEC]; ok && oldJson != "" {
 			var oldSpec appdynamicsv1alpha1.InfraViz
 			errJson := json.Unmarshal([]byte(oldJson), &oldSpec)
@@ -218,6 +314,7 @@ func (r *ReconcileInfraViz) ensureConfigMap(infraViz *appdynamicsv1alpha1.InfraV
 				log.Error(errJson, "Unable to retrieve the old spec from annotations", "infraViz.Namespace", infraViz.Namespace, "infraViz.Name", infraViz.Name)
 			}
 			if !reflect.DeepEqual(&oldSpec.Spec, &infraViz.Spec) {
+				log.Info("Validate. Breaking changes detected compared to annotations")
 				breakingChanges = true
 			}
 		}
@@ -225,11 +322,15 @@ func (r *ReconcileInfraViz) ensureConfigMap(infraViz *appdynamicsv1alpha1.InfraV
 
 	logLevel := "info"
 
+	//validate image for windows, as it is required
+	if infraViz.Spec.NodeOS == OS_WINDOWS && infraViz.Spec.ImageWin == "" {
+		return breakingChanges, fmt.Errorf("Image reference is required. For Windows and Mixed clusters set ImageWin property")
+	}
+
 	errVal, controllerDns, port, sslEnabled := validateControllerUrl(infraViz.Spec.ControllerUrl)
 	if errVal != nil {
 		return breakingChanges, errVal
 	}
-	fmt.Printf("port=%d\n", port)
 
 	eventUrl := infraViz.Spec.EventServiceUrl
 	if eventUrl == "" {
@@ -249,76 +350,119 @@ func (r *ReconcileInfraViz) ensureConfigMap(infraViz *appdynamicsv1alpha1.InfraV
 		arr := strings.Split(infraViz.Spec.ProxyUrl, ":")
 		if len(arr) != 3 {
 			fmt.Println("ProxyUrl is invalid. Use this format: protocol://domain:port")
+			return breakingChanges, fmt.Errorf("ProxyUrl is invalid. Use this format: protocol://domain:port")
+		} else {
+			proxyHost = strings.TrimLeft(arr[1], "//")
+			proxyPort = arr[2]
 		}
-		proxyHost = strings.TrimLeft(arr[1], "//")
-		proxyPort = arr[2]
 	}
 
 	if infraViz.Spec.ProxyUser != "" {
 		arr := strings.Split(infraViz.Spec.ProxyUser, "@")
 		if len(arr) != 2 {
 			fmt.Println("ProxyUser is invalid. Use this format: user@pass")
+			return breakingChanges, fmt.Errorf("ProxyUser is invalid. Use this format: user@pass")
+		} else {
+			proxyUser = arr[0]
+			proxyPass = arr[1]
 		}
-		proxyUser = arr[0]
-		proxyPass = arr[1]
 	}
 
 	if infraViz.Spec.LogLevel != "" {
 		logLevel = infraViz.Spec.LogLevel
 	}
 
-	if infraViz.Spec.NetVizPort > 0 {
+	if infraViz.Spec.NetVizPort > 0 && infraViz.Spec.NodeOS != OS_WINDOWS {
 		r.ensureNetVizConfig(infraViz)
 	}
 
+	isWindows := infraViz.Spec.NodeOS == OS_WINDOWS
+	logConfigRequired := isWindows == false
+
 	cm := &corev1.ConfigMap{}
-	err := r.client.Get(context.TODO(), types.NamespacedName{Name: "ma-config", Namespace: infraViz.Namespace}, cm)
+	cmName := getConfigMapName(infraViz)
+
+	err := r.client.Get(context.TODO(), types.NamespacedName{Name: cmName, Namespace: infraViz.Namespace}, cm)
 
 	create := false
 	if err != nil && errors.IsNotFound(err) {
-		fmt.Printf("Config map not found. Creating...\n")
+		fmt.Printf("Config map %s not found. Creating...\n", cmName)
 		//configMap does not exist. Create
-		cm.Name = "ma-config"
+		cm.Name = cmName
 		cm.Namespace = infraViz.Namespace
 		cm.Data = make(map[string]string)
 		create = true
-
 	} else if err != nil {
-		return breakingChanges, fmt.Errorf("Failed to load configMap ma-config. %v", err)
+		return breakingChanges, fmt.Errorf("Failed to load configMap %s. %v", cmName, err)
+	}
+
+	if infraViz.Spec.EnableContainerHostId == "" {
+		infraViz.Spec.EnableContainerHostId = "true"
+	}
+
+	if infraViz.Spec.EnableServerViz == "" {
+		infraViz.Spec.EnableServerViz = "true"
+	}
+
+	if infraViz.Spec.EnableDockerViz == "" {
+		infraViz.Spec.EnableDockerViz = "true"
 	}
 
 	if !create {
-		if cm.Data["APPDYNAMICS_LOG_LEVEL"] != logLevel ||
-			cm.Data["APPDYNAMICS_LOG_STDOUT"] != strconv.FormatBool(infraViz.Spec.StdoutLogging) {
-			breakingChanges = true
-			e := r.ensureLogConfig(infraViz, logLevel)
-			if e != nil {
-				return breakingChanges, e
+		if !newDS {
+			if logConfigRequired {
+				if cm.Data["APPDYNAMICS_LOG_LEVEL"] != logLevel ||
+					cm.Data["APPDYNAMICS_LOG_STDOUT"] != strconv.FormatBool(infraViz.Spec.StdoutLogging) {
+					breakingChanges = false
+					if strings.Contains(infraViz.Spec.Image, "4.5") {
+						e := r.ensureLogConfig(infraViz, logLevel)
+						if e != nil {
+							return breakingChanges, e
+						}
+					} else {
+						e := r.ensureLogConfigCalendar(infraViz, logLevel)
+						if e != nil {
+							return breakingChanges, e
+						}
+					}
+				}
 			}
-		}
 
-		if cm.Data["APPDYNAMICS_AGENT_ACCOUNT_NAME"] != infraViz.Spec.Account ||
-			cm.Data["APPDYNAMICS_AGENT_GLOBAL_ACCOUNT_NAME"] != infraViz.Spec.GlobalAccount ||
-			cm.Data["APPDYNAMICS_CONTROLLER_HOST_NAME"] != controllerDns ||
-			cm.Data["APPDYNAMICS_CONTROLLER_PORT"] != strconv.Itoa(int(port)) ||
-			cm.Data["APPDYNAMICS_CONTROLLER_SSL_ENABLED"] != sslEnabled ||
-			cm.Data["EVENT_ENDPOINT"] != eventUrl ||
-			cm.Data["APPDYNAMICS_AGENT_PROXY_HOST"] != proxyHost ||
-			cm.Data["APPDYNAMICS_AGENT_PROXY_PORT"] != proxyPort ||
-			cm.Data["APPDYNAMICS_AGENT_PROXY_USER"] != proxyUser ||
-			cm.Data["APPDYNAMICS_AGENT_PROXY_PASS"] != proxyPass ||
-			cm.Data["APPDYNAMICS_AGENT_ENABLE_CONTAINERIDASHOSTID"] != infraViz.Spec.EnableContainerHostId ||
-			cm.Data["APPDYNAMICS_SIM_ENABLED"] != infraViz.Spec.EnableServerViz ||
-			cm.Data["APPDYNAMICS_DOCKER_ENABLED"] != infraViz.Spec.EnableDockerViz ||
-			cm.Data["APPDYNAMICS_AGENT_METRIC_LIMIT"] != infraViz.Spec.MetricsLimit ||
-			cm.Data["APPDYNAMICS_MA_PROPERTIES"] != infraViz.Spec.PropertyBag {
-			breakingChanges = true
+			//			if cm.Data["APPDYNAMICS_AGENT_ACCOUNT_NAME"] != infraViz.Spec.Account ||
+			//				cm.Data["APPDYNAMICS_AGENT_GLOBAL_ACCOUNT_NAME"] != infraViz.Spec.GlobalAccount ||
+			//				cm.Data["APPDYNAMICS_CONTROLLER_HOST_NAME"] != controllerDns ||
+			//				cm.Data["APPDYNAMICS_CONTROLLER_PORT"] != strconv.Itoa(int(port)) ||
+			//				cm.Data["APPDYNAMICS_SYSLOG_PORT"] != strconv.Itoa(int(infraViz.Spec.SyslogPort)) ||
+			//				cm.Data["APPDYNAMICS_WIN_IMAGE"] != infraViz.Spec.ImageWin ||
+			//				cm.Data["APPDYNAMICS_CONTROLLER_SSL_ENABLED"] != sslEnabled ||
+			//				cm.Data["EVENT_ENDPOINT"] != eventUrl ||
+			//				cm.Data["APPDYNAMICS_AGENT_PROXY_HOST"] != proxyHost ||
+			//				cm.Data["APPDYNAMICS_AGENT_PROXY_PORT"] != proxyPort ||
+			//				cm.Data["APPDYNAMICS_AGENT_PROXY_USER"] != proxyUser ||
+			//				cm.Data["APPDYNAMICS_AGENT_PROXY_PASS"] != proxyPass ||
+			//				cm.Data["APPDYNAMICS_AGENT_ENABLE_CONTAINERIDASHOSTID"] != infraViz.Spec.EnableContainerHostId ||
+			//				cm.Data["APPDYNAMICS_SIM_ENABLED"] != infraViz.Spec.EnableServerViz ||
+			//				cm.Data["APPDYNAMICS_DOCKER_ENABLED"] != infraViz.Spec.EnableDockerViz ||
+			//				cm.Data["APPDYNAMICS_AGENT_METRIC_LIMIT"] != infraViz.Spec.MetricsLimit ||
+			//				cm.Data["APPDYNAMICS_MA_PROPERTIES"] != infraViz.Spec.PropertyBag {
+			//				log.Info("Validate. Breaking changes detected compared to configMap", "infraviz", existingDS.Name, "CM", cm.Name)
+			//				breakingChanges = true
+			//			}
 		}
 
 	} else {
-		e := r.ensureLogConfig(infraViz, logLevel)
-		if e != nil {
-			return breakingChanges, e
+		if logConfigRequired {
+			if strings.Contains(infraViz.Spec.Image, "4.5") {
+				e := r.ensureLogConfig(infraViz, logLevel)
+				if e != nil {
+					return breakingChanges, e
+				}
+			} else {
+				e := r.ensureLogConfigCalendar(infraViz, logLevel)
+				if e != nil {
+					return breakingChanges, e
+				}
+			}
 		}
 	}
 
@@ -329,21 +473,12 @@ func (r *ReconcileInfraViz) ensureConfigMap(infraViz *appdynamicsv1alpha1.InfraV
 	cm.Data["APPDYNAMICS_CONTROLLER_SSL_ENABLED"] = string(sslEnabled)
 
 	cm.Data["APPDYNAMICS_NETVIZ_AGENT_PORT"] = strconv.Itoa(int(infraViz.Spec.NetVizPort))
+	cm.Data["APPDYNAMICS_SYSLOG_PORT"] = strconv.Itoa(int(infraViz.Spec.SyslogPort))
+	cm.Data["APPDYNAMICS_WIN_IMAGE"] = infraViz.Spec.ImageWin
 
-	if infraViz.Spec.EnableContainerHostId == "" {
-		infraViz.Spec.EnableContainerHostId = "true"
-	}
 	cm.Data["APPDYNAMICS_AGENT_ENABLE_CONTAINERIDASHOSTID"] = infraViz.Spec.EnableContainerHostId
 
-	if infraViz.Spec.EnableServerViz == "" {
-		infraViz.Spec.EnableServerViz = "true"
-	}
-
 	cm.Data["APPDYNAMICS_SIM_ENABLED"] = infraViz.Spec.EnableServerViz
-
-	if infraViz.Spec.EnableDockerViz == "" {
-		infraViz.Spec.EnableDockerViz = "true"
-	}
 
 	cm.Data["APPDYNAMICS_DOCKER_ENABLED"] = infraViz.Spec.EnableDockerViz
 
@@ -356,6 +491,10 @@ func (r *ReconcileInfraViz) ensureConfigMap(infraViz *appdynamicsv1alpha1.InfraV
 	cm.Data["APPDYNAMICS_LOG_LEVEL"] = logLevel
 	cm.Data["APPDYNAMICS_LOG_STDOUT"] = strconv.FormatBool(infraViz.Spec.StdoutLogging)
 	cm.Data["APPDYNAMICS_MA_PROPERTIES"] = infraViz.Spec.PropertyBag
+
+	if errOwner := controllerutil.SetControllerReference(infraViz, cm, r.scheme); errOwner != nil {
+		return breakingChanges, fmt.Errorf("Unable to set ownership to MA config map. %v", errOwner)
+	}
 
 	if create {
 		e := r.client.Create(context.TODO(), cm)
@@ -418,7 +557,7 @@ func (r *ReconcileInfraViz) restartDaemonSet(infraViz *appdynamicsv1alpha1.Infra
 
 	for _, p := range podList.Items {
 		err = r.client.Delete(context.TODO(), &p)
-		if err != nil {
+		if err != nil && errors.IsNotFound(err) == false {
 			return fmt.Errorf("Unable to delete InfraViz pod. %v", err)
 		}
 	}
@@ -437,11 +576,14 @@ func (r *ReconcileInfraViz) getInfraVizPods(infraViz *appdynamicsv1alpha1.InfraV
 	if err != nil {
 		return nil, fmt.Errorf("Unable to load InfraViz pods. %v", err)
 	}
+	log.Info("Loaded InfraViz pods", "Number:", podList.Size(), "OS:", infraViz.Spec.NodeOS)
 
 	return &podList, nil
 }
 
 func (r *ReconcileInfraViz) newInfraVizDaemonSet(infraViz *appdynamicsv1alpha1.InfraViz) *appsv1.DaemonSet {
+	dsName := getDaemonName(infraViz)
+
 	netviz := false
 	if infraViz.Spec.NetVizPort > 0 {
 		netviz = true
@@ -462,7 +604,7 @@ func (r *ReconcileInfraViz) newInfraVizDaemonSet(infraViz *appdynamicsv1alpha1.I
 
 	ds := appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      infraViz.Name,
+			Name:      dsName,
 			Namespace: infraViz.Namespace,
 			Labels:    selector,
 		},
@@ -491,8 +633,15 @@ func (r *ReconcileInfraViz) newInfraVizDaemonSet(infraViz *appdynamicsv1alpha1.I
 
 func (r *ReconcileInfraViz) newPodSpecForCR(infraViz *appdynamicsv1alpha1.InfraViz, netviz bool) corev1.PodSpec {
 	trueVar := true
-	if infraViz.Spec.Image == "" {
-		infraViz.Spec.Image = "appdynamics/machine-agent-analytics:latest"
+	isWindows := infraViz.Spec.NodeOS == OS_WINDOWS
+
+	imageName := infraViz.Spec.Image
+	if imageName == "" {
+		imageName = "appdynamics/machine-agent-analytics:latest"
+	}
+
+	if isWindows {
+		imageName = infraViz.Spec.ImageWin
 	}
 
 	if infraViz.Spec.NetVizImage == "" {
@@ -503,11 +652,28 @@ func (r *ReconcileInfraViz) newPodSpecForCR(infraViz *appdynamicsv1alpha1.InfraV
 		infraViz.Spec.EnableContainerHostId = "true"
 	}
 
+	if r.addNodeSelector {
+		if infraViz.Spec.NodeSelector == nil {
+			infraViz.Spec.NodeSelector = make(map[string]string)
+		}
+		if infraViz.Spec.NodeOS == OS_LINUX || infraViz.Spec.NodeOS == "" {
+			infraViz.Spec.NodeSelector["kubernetes.io/os"] = OS_LINUX
+		}
+		if infraViz.Spec.NodeOS == OS_WINDOWS {
+			infraViz.Spec.NodeSelector["kubernetes.io/os"] = OS_WINDOWS
+		}
+	}
+
+	secretName := AGENT_SECRET_NAME
+	if infraViz.Spec.AccessSecret != "" {
+		secretName = infraViz.Spec.AccessSecret
+	}
+
 	accessKey := corev1.EnvVar{
 		Name: "APPDYNAMICS_AGENT_ACCOUNT_ACCESS_KEY",
 		ValueFrom: &corev1.EnvVarSource{
 			SecretKeyRef: &corev1.SecretKeySelector{
-				LocalObjectReference: corev1.LocalObjectReference{Name: AGENT_SECRET_NAME},
+				LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
 				Key:                  "controller-key",
 			},
 		},
@@ -515,7 +681,36 @@ func (r *ReconcileInfraViz) newPodSpecForCR(infraViz *appdynamicsv1alpha1.InfraV
 
 	if infraViz.Spec.Env == nil || len(infraViz.Spec.Env) == 0 {
 		infraViz.Spec.Env = []corev1.EnvVar{}
+	}
+
+	if !envVarExists("APPDYNAMICS_AGENT_ACCOUNT_ACCESS_KEY", infraViz.Spec.Env) {
 		infraViz.Spec.Env = append(infraViz.Spec.Env, accessKey)
+	}
+
+	if infraViz.Spec.UniqueHostId == "" {
+		infraViz.Spec.UniqueHostId = UNIQUE_ID_FROM_HOST_NAME
+		if infraViz.Spec.Pks {
+			infraViz.Spec.UniqueHostId = UNIQUE_ID_FROM_HOST_IP
+		}
+	} else {
+		if infraViz.Spec.UniqueHostId != UNIQUE_ID_FROM_HOST_NAME &&
+			infraViz.Spec.UniqueHostId != UNIQUE_ID_FROM_HOST_IP {
+			infraViz.Spec.UniqueHostId = ""
+		}
+	}
+
+	if infraViz.Spec.UniqueHostId != "" {
+		uniqueHostId := corev1.EnvVar{
+			Name: "APPDYNAMICS_AGENT_UNIQUE_HOST_ID",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: infraViz.Spec.UniqueHostId,
+				},
+			},
+		}
+		if !envVarExists("APPDYNAMICS_AGENT_UNIQUE_HOST_ID", infraViz.Spec.Env) {
+			infraViz.Spec.Env = append(infraViz.Spec.Env, uniqueHostId)
+		}
 	}
 
 	dir := corev1.HostPathDirectory
@@ -523,7 +718,27 @@ func (r *ReconcileInfraViz) newPodSpecForCR(infraViz *appdynamicsv1alpha1.InfraV
 
 	cm := corev1.EnvFromSource{}
 	cm.ConfigMapRef = &corev1.ConfigMapEnvSource{}
-	cm.ConfigMapRef.Name = AGENT_CONFIG_NAME
+	cmName := getConfigMapName(infraViz)
+	cm.ConfigMapRef.Name = cmName
+
+	ports := infraViz.Spec.Ports
+	if ports == nil || len(ports) == 0 {
+		ports = []corev1.ContainerPort{}
+	}
+	biqPort := corev1.ContainerPort{
+		ContainerPort: infraViz.Spec.BiqPort,
+		Protocol:      corev1.ProtocolTCP,
+	}
+	ports = append(ports, biqPort)
+
+	if infraViz.Spec.SyslogPort > 0 {
+		sysLogPort := corev1.ContainerPort{
+			ContainerPort: infraViz.Spec.SyslogPort,
+			Protocol:      corev1.ProtocolTCP,
+			HostPort:      infraViz.Spec.SyslogPort,
+		}
+		ports = append(ports, sysLogPort)
+	}
 
 	podSpec := corev1.PodSpec{
 		Containers: []corev1.Container{{
@@ -532,43 +747,77 @@ func (r *ReconcileInfraViz) newPodSpecForCR(infraViz *appdynamicsv1alpha1.InfraV
 			EnvFrom: []corev1.EnvFromSource{
 				cm,
 			},
-			Image:           infraViz.Spec.Image,
+			Image:           imageName,
 			ImagePullPolicy: corev1.PullAlways,
 			Name:            "appd-infra-agent",
 
 			Resources: infraViz.Spec.Resources,
-			SecurityContext: &corev1.SecurityContext{
-				Privileged: &trueVar,
-			},
-			Ports: []corev1.ContainerPort{{
-				ContainerPort: infraViz.Spec.BiqPort,
-				Protocol:      corev1.ProtocolTCP,
-			}},
-			VolumeMounts: []corev1.VolumeMount{{
-				Name:      "hostroot",
-				MountPath: "/hostroot",
-				ReadOnly:  true,
-			}, {
-				Name:      "ma-log-volume",
-				MountPath: "/opt/appdynamics/conf/logging/log4j.xml",
-				SubPath:   "log4j.xml",
-				ReadOnly:  true,
-			}},
+			Ports:     ports,
 		}},
-		HostNetwork:        true,
-		HostPID:            true,
-		HostIPC:            true,
 		NodeSelector:       infraViz.Spec.NodeSelector,
 		ServiceAccountName: "appdynamics-infraviz",
 		Tolerations:        infraViz.Spec.Tolerations,
-		Volumes: []corev1.Volume{{
-			Name: "hostroot",
-			VolumeSource: corev1.VolumeSource{
-				HostPath: &corev1.HostPathVolumeSource{
-					Path: "/", Type: &dir,
+	}
+
+	//image pull secret
+	if infraViz.Spec.ImagePullSecret != "" {
+		podSpec.ImagePullSecrets = []corev1.LocalObjectReference{
+			{Name: infraViz.Spec.ImagePullSecret},
+		}
+	}
+
+	if isWindows == false {
+		podSpec.Containers[0].VolumeMounts = []corev1.VolumeMount{
+			{
+				Name:      "proc",
+				MountPath: "/hostroot/proc",
+				ReadOnly:  true,
+			},
+			{
+				Name:      "etc",
+				MountPath: "/hostroot/etc",
+				ReadOnly:  true,
+			}, {
+				Name:      "sys",
+				MountPath: "/hostroot/sys",
+				ReadOnly:  true,
+			},
+			{
+				Name:      "ma-log-volume",
+				MountPath: "/opt/appdynamics/conf/logging",
+				ReadOnly:  true,
+			}}
+		podSpec.Containers[0].SecurityContext = &corev1.SecurityContext{
+			Privileged: &trueVar,
+		}
+		podSpec.HostNetwork = true
+		podSpec.HostPID = true
+		podSpec.HostIPC = true
+		podSpec.Volumes = []corev1.Volume{
+			{
+				Name: "proc",
+				VolumeSource: corev1.VolumeSource{
+					HostPath: &corev1.HostPathVolumeSource{
+						Path: "/proc", Type: &dir,
+					},
 				},
 			},
-		},
+			{
+				Name: "etc",
+				VolumeSource: corev1.VolumeSource{
+					HostPath: &corev1.HostPathVolumeSource{
+						Path: "/etc", Type: &dir,
+					},
+				},
+			},
+			{
+				Name: "sys",
+				VolumeSource: corev1.VolumeSource{
+					HostPath: &corev1.HostPathVolumeSource{
+						Path: "/sys", Type: &dir,
+					},
+				},
+			},
 			{
 				Name: "ma-log-volume",
 				VolumeSource: corev1.VolumeSource{
@@ -578,20 +827,28 @@ func (r *ReconcileInfraViz) newPodSpecForCR(infraViz *appdynamicsv1alpha1.InfraV
 						},
 					},
 				},
-			}},
+			}}
 	}
 
-	if infraViz.Spec.EnableMasters {
+	if infraViz.Spec.PriorityClassName != "" {
+		podSpec.PriorityClassName = infraViz.Spec.PriorityClassName
+	}
+
+	if isWindows == false && infraViz.Spec.EnableMasters {
 		tolerationMasters := corev1.Toleration{Key: "node-role.kubernetes.io/master", Effect: corev1.TaintEffectNoSchedule, Operator: corev1.TolerationOpExists}
-		podSpec.Tolerations = []corev1.Toleration{tolerationMasters}
+		if podSpec.Tolerations == nil {
+			podSpec.Tolerations = []corev1.Toleration{tolerationMasters}
+		} else {
+			podSpec.Tolerations = append(podSpec.Tolerations, tolerationMasters)
+		}
 	}
 
-	if infraViz.Spec.EnableDockerViz == "" {
+	if isWindows == false && infraViz.Spec.EnableDockerViz == "" {
 		infraViz.Spec.EnableDockerViz = "true"
 	}
 
 	var dockerVol corev1.Volume
-	if infraViz.Spec.EnableDockerViz == "true" {
+	if isWindows == false && infraViz.Spec.EnableDockerViz == "true" {
 		if infraViz.Spec.Pks {
 			dockerVol = corev1.Volume{
 				Name: "docker-sock",
@@ -628,7 +885,7 @@ func (r *ReconcileInfraViz) newPodSpecForCR(infraViz *appdynamicsv1alpha1.InfraV
 		podSpec.Containers[0].VolumeMounts = append(podSpec.Containers[0].VolumeMounts, volMountDocker)
 	}
 
-	if netviz {
+	if isWindows == false && netviz {
 		resRequest := corev1.ResourceList{}
 		resRequest[corev1.ResourceCPU] = resource.MustParse("0.1")
 		resRequest[corev1.ResourceMemory] = resource.MustParse("150Mi")
@@ -671,7 +928,7 @@ func (r *ReconcileInfraViz) newPodSpecForCR(infraViz *appdynamicsv1alpha1.InfraV
 		podSpec.Containers = append(podSpec.Containers, netVizContainer)
 	}
 
-	if infraViz.Spec.AgentSSLStoreName != "" {
+	if isWindows == false && infraViz.Spec.AgentSSLStoreName != "" {
 		//custom SSL cert store
 		volSSL := corev1.Volume{
 			Name: "ssl-volume",
@@ -714,6 +971,17 @@ func (r *ReconcileInfraViz) newPodSpecForCR(infraViz *appdynamicsv1alpha1.InfraV
 	}
 
 	return podSpec
+}
+
+func envVarExists(envVarName string, envs []corev1.EnvVar) bool {
+	exists := false
+	for _, envVar := range envs {
+		if envVar.Name == envVarName {
+			exists = true
+			break
+		}
+	}
+	return exists
 }
 
 func hasDSpecChanged(dsSpec *appsv1.DaemonSetSpec, newSpec *appsv1.DaemonSetSpec, ivSpec *appdynamicsv1alpha1.InfraVizSpec) bool {
@@ -850,6 +1118,93 @@ func (r *ReconcileInfraViz) ensureSSLConfig(infraViz *appdynamicsv1alpha1.InfraV
 	return nil
 }
 
+func (r *ReconcileInfraViz) ensureLogConfigCalendar(infraViz *appdynamicsv1alpha1.InfraViz, logLevel string) error {
+
+	appender := "FileAppender"
+	if infraViz.Spec.StdoutLogging {
+		appender = "ConsoleAppender"
+	}
+
+	xml := `<?xml version="1.0" encoding="UTF-8" ?>
+<configuration status="Warn" monitorInterval="30">
+
+    <Appenders>
+        <Console name="ConsoleAppender" target="SYSTEM_OUT">
+            <PatternLayout pattern="%d{ABSOLUTE} %5p [%t] %c{1} - %m%n"/>
+        </Console>
+
+        <RollingFile name="FileAppender" fileName="${log4j:configParentLocation}/../../logs/machine-agent.log"
+                     filePattern="${log4j:configParentLocation}/../../logs/machine-agent.log.%i">
+            <PatternLayout>
+                <Pattern>[%t] %d{DATE} %5p %c{1} - %m%n</Pattern>
+            </PatternLayout>
+            <Policies>
+                <SizeBasedTriggeringPolicy size="5000 KB"/>
+            </Policies>
+            <DefaultRolloverStrategy max="5"/>
+        </RollingFile>
+    </Appenders>` + fmt.Sprintf(`
+
+    <Loggers>
+        <Logger name="com.singularity" level="%s" additivity="false">
+            <AppenderRef ref="%s"/>
+        </Logger>
+        <Logger name="com.appdynamics" level="%s" additivity="false">
+            <AppenderRef ref="%s"/>
+        </Logger>
+        <Logger name="com.singularity.ee.agent.systemagent.task.sigar.SigarAppAgentMonitor" level="%s" additivity="false">
+            <AppenderRef ref="%s"/>
+        </Logger>
+        <Root level="error">
+            <AppenderRef ref="%s"/>
+        </Root>
+    </Loggers>
+
+</configuration>`, logLevel, appender, logLevel, appender, logLevel, appender, appender)
+
+	cm := &corev1.ConfigMap{}
+	err := r.client.Get(context.TODO(), types.NamespacedName{Name: AGENT_LOG_CONFIG_NAME, Namespace: infraViz.Namespace}, cm)
+
+	create := err != nil && errors.IsNotFound(err)
+	//	if err == nil {
+	//		e := r.client.Delete(context.TODO(), cm)
+	//		if e != nil {
+	//			return fmt.Errorf("Unable to delete the old MA Log configMap. %v", e)
+	//		}
+	//	}
+	if err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("Unable to load MA Log configMap. %v", err)
+	}
+
+	//	fmt.Printf("Recreating MA Log Config Map\n")
+
+	cm.Name = AGENT_LOG_CONFIG_NAME
+	cm.Namespace = infraViz.Namespace
+	cm.Data = make(map[string]string)
+	cm.Data["log4j.xml"] = string(xml)
+
+	// Set InfraViz instance as the owner and controller
+	if err := controllerutil.SetControllerReference(infraViz, cm, r.scheme); err != nil {
+		return fmt.Errorf("Unable to set Infraviz as owner of the infra agent log configMap. %v", err)
+	}
+
+	if create {
+		e := r.client.Create(context.TODO(), cm)
+		if e != nil {
+			return fmt.Errorf("Unable to create MA Log configMap. %v", e)
+		}
+	} else {
+		e := r.client.Update(context.TODO(), cm)
+		if e != nil {
+			return fmt.Errorf("Unable to update MA Log configMap. %v", e)
+		}
+	}
+
+	fmt.Println("Logging configuration saved.")
+	return nil
+
+}
+
 func (r *ReconcileInfraViz) ensureLogConfig(infraViz *appdynamicsv1alpha1.InfraViz, logLevel string) error {
 	appender := "FileAppender"
 	if infraViz.Spec.StdoutLogging {
@@ -901,22 +1256,27 @@ func (r *ReconcileInfraViz) ensureLogConfig(infraViz *appdynamicsv1alpha1.InfraV
 	err := r.client.Get(context.TODO(), types.NamespacedName{Name: AGENT_LOG_CONFIG_NAME, Namespace: infraViz.Namespace}, cm)
 
 	create := err != nil && errors.IsNotFound(err)
-	if err == nil {
-		e := r.client.Delete(context.TODO(), cm)
-		if e != nil {
-			return fmt.Errorf("Unable to delete the old MA Log configMap. %v", e)
-		}
-	}
+	//	if err == nil {
+	//		e := r.client.Delete(context.TODO(), cm)
+	//		if e != nil {
+	//			return fmt.Errorf("Unable to delete the old MA Log configMap. %v", e)
+	//		}
+	//	}
 	if err != nil && !errors.IsNotFound(err) {
 		return fmt.Errorf("Unable to load MA Log configMap. %v", err)
 	}
 
-	fmt.Printf("Recreating MA Log Config Map\n")
+	//	fmt.Printf("Recreating MA Log Config Map\n")
 
 	cm.Name = AGENT_LOG_CONFIG_NAME
 	cm.Namespace = infraViz.Namespace
 	cm.Data = make(map[string]string)
 	cm.Data["log4j.xml"] = string(xml)
+
+	// Set InfraViz instance as the owner and controller
+	if err := controllerutil.SetControllerReference(infraViz, cm, r.scheme); err != nil {
+		return fmt.Errorf("Unable to set Infraviz as owner of the infra agent configMap. %v", err)
+	}
 
 	if create {
 		e := r.client.Create(context.TODO(), cm)
@@ -926,26 +1286,31 @@ func (r *ReconcileInfraViz) ensureLogConfig(infraViz *appdynamicsv1alpha1.InfraV
 	} else {
 		e := r.client.Update(context.TODO(), cm)
 		if e != nil {
-			return fmt.Errorf("Unable to re-create MA Log configMap. %v", e)
+			return fmt.Errorf("Unable to update MA Log configMap. %v", e)
 		}
 	}
 
-	fmt.Println("Configmap re-created")
+	fmt.Println("Logging configuration saved.")
 	return nil
 }
 
 func (r *ReconcileInfraViz) ensureSecret(infraViz *appdynamicsv1alpha1.InfraViz) error {
 	secret := &corev1.Secret{}
 
-	key := client.ObjectKey{Namespace: infraViz.Namespace, Name: AGENT_SECRET_NAME}
+	secretName := AGENT_SECRET_NAME
+	if infraViz.Spec.AccessSecret != "" {
+		secretName = infraViz.Spec.AccessSecret
+	}
+
+	key := client.ObjectKey{Namespace: infraViz.Namespace, Name: secretName}
 	err := r.client.Get(context.TODO(), key, secret)
 	if err != nil && errors.IsNotFound(err) {
-		fmt.Printf("Required secret %s not found. An empty secret will be created, but the clusteragent will not start until at least the 'api-user' key of the secret has a valid value", AGENT_SECRET_NAME)
+		fmt.Printf("Required secret %s not found. An empty secret will be created, but the clusteragent will not start until at least the 'api-user' key of the secret has a valid value", secretName)
 
 		secret = &corev1.Secret{
 			Type: corev1.SecretTypeOpaque,
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      AGENT_SECRET_NAME,
+				Name:      secretName,
 				Namespace: infraViz.Namespace,
 			},
 		}
@@ -953,14 +1318,13 @@ func (r *ReconcileInfraViz) ensureSecret(infraViz *appdynamicsv1alpha1.InfraViz)
 		secret.StringData = make(map[string]string)
 		secret.StringData["api-user"] = ""
 		secret.StringData["controller-key"] = ""
-		secret.StringData["event-key"] = ""
 
 		errCreate := r.client.Create(context.TODO(), secret)
 		if errCreate != nil {
 			fmt.Printf("Unable to create secret. %v\n", errCreate)
 			return fmt.Errorf("Unable to get secret for cluster-agent. %v", errCreate)
 		} else {
-			fmt.Printf("Secret created. %s\n", AGENT_SECRET_NAME)
+			fmt.Printf("Secret created. %s\n", secretName)
 			errLoad := r.client.Get(context.TODO(), key, secret)
 			if errLoad != nil {
 				fmt.Printf("Unable to reload secret. %v\n", errLoad)
@@ -975,9 +1339,10 @@ func (r *ReconcileInfraViz) ensureSecret(infraViz *appdynamicsv1alpha1.InfraViz)
 }
 
 func (r *ReconcileInfraViz) ensureAgentService(infraViz *appdynamicsv1alpha1.InfraViz) error {
+	dsName := getDaemonName(infraViz)
 	selector := labelsForInfraViz(infraViz)
 	svc := &corev1.Service{}
-	key := client.ObjectKey{Namespace: infraViz.Namespace, Name: infraViz.Name}
+	key := client.ObjectKey{Namespace: infraViz.Namespace, Name: dsName}
 	err := r.client.Get(context.TODO(), key, svc)
 	if err != nil && !errors.IsNotFound(err) {
 		return fmt.Errorf("Unable to get service for cluster-agent. %v\n", err)
@@ -992,7 +1357,7 @@ func (r *ReconcileInfraViz) ensureAgentService(infraViz *appdynamicsv1alpha1.Inf
 				APIVersion: "v1",
 			},
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      infraViz.Name,
+				Name:      dsName,
 				Namespace: infraViz.Namespace,
 				Labels:    selector,
 			},
@@ -1009,7 +1374,6 @@ func (r *ReconcileInfraViz) ensureAgentService(infraViz *appdynamicsv1alpha1.Inf
 		}
 
 		if infraViz.Spec.NetVizPort > 0 {
-
 			netVizPort := corev1.ServicePort{
 				Name:     "netviz-port",
 				Protocol: corev1.ProtocolTCP,
@@ -1017,6 +1381,32 @@ func (r *ReconcileInfraViz) ensureAgentService(infraViz *appdynamicsv1alpha1.Inf
 			}
 			svc.Spec.Ports = append(svc.Spec.Ports, netVizPort)
 		}
+
+		if infraViz.Spec.SyslogPort > 0 {
+			syslogPort := corev1.ServicePort{
+				Name:     "syslog-port",
+				Protocol: corev1.ProtocolTCP,
+				Port:     infraViz.Spec.SyslogPort,
+			}
+			svc.Spec.Ports = append(svc.Spec.Ports, syslogPort)
+		}
+
+		if infraViz.Spec.Ports != nil && len(infraViz.Spec.Ports) > 0 {
+			for _, p := range infraViz.Spec.Ports {
+				customPort := corev1.ServicePort{
+					Name:     p.Name,
+					Protocol: corev1.ProtocolTCP,
+					Port:     p.ContainerPort,
+				}
+				svc.Spec.Ports = append(svc.Spec.Ports, customPort)
+			}
+		}
+
+		// Set InfraViz instance as the owner and controller
+		if err := controllerutil.SetControllerReference(infraViz, svc, r.scheme); err != nil {
+			return fmt.Errorf("Unable to set Infraviz as owner of the infra agent service. %v", err)
+		}
+
 		errCreate := r.client.Create(context.TODO(), svc)
 		if errCreate != nil {
 			return fmt.Errorf("Failed to create infraViz agent service: %v", errCreate)
@@ -1028,7 +1418,24 @@ func (r *ReconcileInfraViz) ensureAgentService(infraViz *appdynamicsv1alpha1.Inf
 }
 
 func labelsForInfraViz(infraViz *appdynamicsv1alpha1.InfraViz) map[string]string {
-	return map[string]string{"name": "infraViz", "infraViz_cr": infraViz.Name}
+	dsName := getDaemonName(infraViz)
+	return map[string]string{"infraViz_cr": dsName}
+}
+
+func getDaemonName(infraViz *appdynamicsv1alpha1.InfraViz) string {
+	dsName := infraViz.Name
+	if infraViz.Spec.NodeOS == OS_WINDOWS {
+		dsName = fmt.Sprintf("%s-win", dsName)
+	}
+	return dsName
+}
+
+func getConfigMapName(infraViz *appdynamicsv1alpha1.InfraViz) string {
+	cmName := AGENT_CONFIG_NAME
+	if infraViz.Spec.NodeOS == OS_WINDOWS {
+		cmName = fmt.Sprintf("%s-%s", AGENT_CONFIG_NAME, OS_WINDOWS)
+	}
+	return cmName
 }
 
 func (r *ReconcileInfraViz) ensureNetVizConfig(infraViz *appdynamicsv1alpha1.InfraViz) error {
@@ -1241,6 +1648,11 @@ system_metadata = {
 	cm.Namespace = infraViz.Namespace
 	cm.Data = make(map[string]string)
 	cm.Data["agent_config.lua"] = string(netvizProps)
+
+	// Set InfraViz instance as the owner and controller
+	if err := controllerutil.SetControllerReference(infraViz, cm, r.scheme); err != nil {
+		return fmt.Errorf("Unable to set Infraviz as owner of Netviz configMap. %v", err)
+	}
 
 	if create {
 		e := r.client.Create(context.TODO(), cm)

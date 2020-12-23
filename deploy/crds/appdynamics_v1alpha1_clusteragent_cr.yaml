@@ -3,16 +3,9 @@ kind: Clusteragent
 metadata:
   name: local-k8s
 spec:
-  controllerUrl: ""
-  appDJavaAttachImage: "appdynamics/java-agent:latest"
-  appDDotNetAttachImage: "appdynamics/dotnet-core-agent:latest"
-  nsToInstrument:
-    - ns1
-  instrumentRule:
-	- matchString: "client-api"
-	  namespaces:
-	    - ns2
-	  appDAppLabel: "appName"
-	  appDTierLabel: "tierName"
-	  version: "appdynamics/java-agent:4.5.6"
-      biq: "sidecar"
+  controllerUrl: "https://saas.appdynamics.com"
+  account: "customer2"
+  appName: "Cluster2"
+  logLevel: "DEBUG"
+  stdoutLogging: "true"
+  image: "registry.connect.redhat.com/appdynamics/cluster-agent"
