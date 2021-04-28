@@ -783,6 +783,7 @@ spec:
                 - services
                 - configmaps
                 - secrets
+                - replicationcontrollers
               verbs:
                 - get
                 - watch
@@ -826,6 +827,14 @@ spec:
                 - get
                 - list
                 - watch
+            - apiGroups:
+                - apps.openshift.io
+                resources:
+                  - deploymentconfigs
+                verbs:
+                  - get
+                  - watch
+                  - list
         - serviceAccountName: appdynamics-cluster-agent
           rules:
             - apiGroups:
@@ -846,6 +855,12 @@ spec:
                 - statefulsets
                 - deployments
                 - replicasets
+              verbs:
+                - update
+            - apiGroups:
+                - apps.openshift.io
+              resources:
+                - deploymentconfigs
               verbs:
                 - update
       deployments:
