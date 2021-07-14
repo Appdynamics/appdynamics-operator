@@ -875,6 +875,8 @@ spec:
       labels:
         name: appdynamics-operator
     spec:
+      nodeSelector: 
+         kubernetes.io/os: linux
       serviceAccountName: appdynamics-operator
       containers:
         - name: appdynamics-operator
